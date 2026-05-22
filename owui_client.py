@@ -4,6 +4,7 @@ Sends chat completions through Open WebUI (which runs the semantic router).
 """
 
 import os
+import json
 import logging
 import requests
 from typing import Optional
@@ -19,12 +20,12 @@ SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "bonsai")
 class OWUIClient:
 
     def __init__(self):
-        self.base_url = OWUI_URL.rstrip("/")
-        self.api_key  = OWUI_API_KEY
-        self.headers  = {
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
+        self.base_url        = OWUI_URL.rstrip("/")
+        self.api_key         = OWUI_API_KEY
+        self.SUMMARIZER_MODEL = SUMMARIZER_MODEL
+        self.headers         = {"Content-Type": "application/json"}
+        if self.api_key:
+            self.headers["Authorization"] = f"Bearer {self.api_key}"
 
     def chat(
         self,
@@ -41,16 +42,18 @@ class OWUIClient:
             "model":    model,
             "messages": messages,
             "stream":   stream,
+            "chat_id":  "residuality_api",
         }
         if temperature is not None:
             payload["temperature"] = temperature
 
         try:
+            logger.info(f"OWUI chat: model={model} url={self.base_url} auth={'yes' if self.api_key else 'NO'}")
+            logger.info(f"OWUI payload: {json.dumps(payload)[:500]}")
             r = requests.post(
                 f"{self.base_url}/api/chat/completions",
                 json=payload,
                 headers=self.headers,
-                timeout=120,
             )
             r.raise_for_status()
             data = r.json()
@@ -59,7 +62,7 @@ class OWUIClient:
             logger.error("OWUI request timed out")
             raise
         except requests.exceptions.HTTPError as e:
-            logger.error(f"OWUI HTTP error: {e}, response: {r.text[:500]}")
+            logger.error(f"OWUI HTTP error: {e}, response: {r.text[:1000]}")
             raise
         except Exception as e:
             logger.error(f"OWUI chat failed: {e}")

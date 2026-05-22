@@ -10,4 +10,5 @@ dist/
 *.out
 *.log
 export/
+repos/
 .DS_Store

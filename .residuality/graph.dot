@@ -245,15 +245,16 @@ digraph residuality {
     // --- end: app-backup.py ---
 
     // --- file: owui_client.py ---
-    "owui_client.py" [type="file", line_start=1, line_end=120];
-    "owui_client.py::OWUIClient" [type="class", file="owui_client.py", line_start=19, line_end=119, signature="class OWUIClient"];
-    "owui_client.py::OWUIClient::__init__" [type="function", file="owui_client.py", line_start=21, line_end=27, signature="__init__(...)"];
-    "owui_client.py::OWUIClient::chat" [type="function", file="owui_client.py", line_start=29, line_end=66, signature="chat(...)"];
-    "owui_client.py::OWUIClient::get_models" [type="function", file="owui_client.py", line_start=68, line_end=80, signature="get_models(...)"];
-    "owui_client.py::OWUIClient::generate_commit_message" [type="function", file="owui_client.py", line_start=82, line_end=111, signature="generate_commit_message(...)"];
-    "owui_client.py::OWUIClient::health_check" [type="function", file="owui_client.py", line_start=113, line_end=119, signature="health_check(...)"];
+    "owui_client.py" [type="file", line_start=1, line_end=123];
+    "owui_client.py::OWUIClient" [type="class", file="owui_client.py", line_start=20, line_end=122, signature="class OWUIClient"];
+    "owui_client.py::OWUIClient::__init__" [type="function", file="owui_client.py", line_start=22, line_end=28, signature="__init__(...)"];
+    "owui_client.py::OWUIClient::chat" [type="function", file="owui_client.py", line_start=30, line_end=69, signature="chat(...)"];
+    "owui_client.py::OWUIClient::get_models" [type="function", file="owui_client.py", line_start=71, line_end=83, signature="get_models(...)"];
+    "owui_client.py::OWUIClient::generate_commit_message" [type="function", file="owui_client.py", line_start=85, line_end=114, signature="generate_commit_message(...)"];
+    "owui_client.py::OWUIClient::health_check" [type="function", file="owui_client.py", line_start=116, line_end=122, signature="health_check(...)"];
 
     "owui_client.py" -> "os" [label="imports"];
+    "owui_client.py" -> "json" [label="imports"];
     "owui_client.py" -> "logging" [label="imports"];
     "owui_client.py" -> "requests" [label="imports"];
     "owui_client.py" -> "typing" [label="imports"];
@@ -330,7 +331,7 @@ digraph residuality {
     // --- end: artifact.py ---
 
     // --- file: README.md ---
-    "README.md" [type="chapter", line_start=1, line_end=3, label="README.md"];
+    "README.md" [type="chapter", line_start=1, line_end=1226, label="README.md"];
 
     // --- end: README.md ---
 
