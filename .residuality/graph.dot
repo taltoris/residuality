@@ -333,4 +333,5 @@ digraph residuality {
     "README.md" [type="chapter", line_start=1, line_end=3, label="README.md"];
 
     // --- end: README.md ---
+
 }
