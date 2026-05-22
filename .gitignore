@@ -1,0 +1,13 @@
+# Residuality default .gitignore
+__pycache__/
+*.pyc
+*.pyo
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+*.out
+*.log
+export/
+.DS_Store
