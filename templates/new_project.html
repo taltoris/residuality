@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}New Project — Residuality{% endblock %}
+{% block content %}
+<h1>New Project</h1>
+<div class="card" style="max-width:500px;">
+    <form method="post">
+        <label>Project ID <span style="color:#8b949e;">(no spaces)</span></label>
+        <input type="text" name="project_id" placeholder="my-novel" autofocus
+               pattern="[a-zA-Z0-9_\-]+" required>
+        <label>Description <span style="color:#8b949e;">(optional)</span></label>
+        <textarea name="description" rows="3" placeholder="What is this project?"></textarea>
+        <button type="submit" class="btn btn-primary" style="width:auto;">Create Project</button>
+        <a href="{{ url_for('projects') }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
+    </form>
+</div>
+{% endblock %}

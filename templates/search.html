@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Search — {{ project_id }} — Residuality{% endblock %}
+{% block content %}
+<h1>Semantic Search — {{ project_id }}</h1>
+<div class="card">
+    <form method="post">
+        <div style="display:flex; gap:0.5rem; align-items:center; margin-bottom:0.5rem;">
+            <input type="text" name="query" value="{{ query }}"
+                   placeholder="find when the auth was working..."
+                   style="flex:1; margin:0;" autofocus>
+            <select name="mode" style="width:140px; margin:0;">
+                <option value="commits"  {% if mode=='commits'  %}selected{% endif %}>Commits</option>
+                <option value="graph"    {% if mode=='graph'    %}selected{% endif %}>Code/Prose nodes</option>
+            </select>
+            <button type="submit" class="btn btn-primary" style="white-space:nowrap;">Search</button>
+        </div>
+    </form>
+</div>
+
+{% if results %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Score</th>
+                <th>{% if mode=='commits' %}Commit{% else %}Node{% endif %}</th>
+                <th>Detail</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for r in results %}
+        <tr>
+            <td style="color:#8b949e; font-size:0.8rem;">{{ r.score }}</td>
+            {% if mode == 'commits' %}
+            <td style="font-family:monospace; color:#58a6ff;">{{ r.commit_hash[:8] if r.commit_hash else '?' }}</td>
+            <td>
+                <div>{{ r.message }}</div>
+                <div style="font-size:0.78rem; color:#8b949e;">
+                    branch: {{ r.branch }} | {{ r.artifact_path }}
+                    {% if r.model_used %} | {{ r.model_used }}{% endif %}
+                </div>
+            </td>
+            <td>
+                {% if r.commit_hash %}
+                <a href="{{ url_for('view_commit', project_id=project_id, commit_hash=r.commit_hash) }}"
+                   class="btn">View</a>
+                {% endif %}
+            </td>
+            {% else %}
+            <td style="font-family:monospace; color:#58a6ff; font-size:0.82rem;">{{ r.node_id }}</td>
+            <td>
+                <div>{{ r.signature or r.label }}</div>
+                <div style="font-size:0.78rem; color:#8b949e;">
+                    {{ r.file }} : {{ r.line_start }}–{{ r.line_end }}
+                </div>
+            </td>
+            <td>
+                <a href="{{ url_for('graph_node', project_id=project_id, node_id=r.node_id) }}"
+                   class="btn">View</a>
+            </td>
+            {% endif %}
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% elif query %}
+<p style="color:#8b949e;">No results for "{{ query }}".</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Project Control — {{ project_id }} — Residuality{% endblock %}
+{% block head %}
+<script>const PROJECT_ID = {{ project_id | tojson }};</script>
+<style>
+#graph-search { display:flex; gap:0.5rem; margin-bottom:1rem; }
+#graph-search input { flex:1; margin:0; }
+.svg-container { overflow:auto; background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:0.5rem; }
+.svg-container svg { max-width:100%; height:auto; }
+.file-row { display:flex; align-items:center; gap:0.5rem; padding:0.3rem 0; border-bottom:1px solid #21262d; font-size:0.85rem; }
+.file-row:last-child { border-bottom:none; }
+.file-status { font-size:0.75rem; padding:0.1rem 0.4rem; border-radius:10px; min-width:2rem; text-align:center; }
+.file-status.M { background:#1a2e1a; color:#3fb950; border:1px solid #2ea043; }
+.file-status.A { background:#1a2035; color:#58a6ff; border:1px solid #388bfd; }
+.file-status.D { background:#2e1a1a; color:#f85149; border:1px solid #da3633; }
+.file-status.Q { background:#2e2a1a; color:#d29922; border:1px solid #9e6a03; }
+.file-size { font-size:0.75rem; color:#8b949e; margin-left:auto; }
+.large-file { color:#8b949e; text-decoration:line-through; }
+.ignore-tag { display:inline-flex; align-items:center; gap:0.3rem; background:#21262d; border:1px solid #30363d; border-radius:12px; padding:0.15rem 0.5rem; font-size:0.78rem; color:#8b949e; font-family:monospace; }
+.ignore-tag button { background:none; border:none; color:#f85149; cursor:pointer; font-size:0.8rem; padding:0; line-height:1; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
+    <h1>Project Control — {{ project_id }}</h1>
+    <div style="display:flex;gap:0.5rem;">
+        <button class="btn" id="build-all-btn" onclick="buildGraphAll(PROJECT_ID)">⚙ Build Graph</button>
+        <button class="btn btn-primary" id="regen-btn" onclick="startRegenerate(PROJECT_ID)">↺ Regenerate &amp; Commit</button>
+    </div>
+</div>
+
+<div id="regen-status" style="display:none;margin-bottom:0.75rem;font-size:0.9rem;"></div>
+
+<details style="margin-bottom:1rem;">
+    <summary style="cursor:pointer;color:#8b949e;font-size:0.9rem;padding:0.5rem 0;">▶ .gitignore</summary>
+    <div class="card" style="margin-top:0.5rem;">
+        <div id="ignore-tags" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem;"></div>
+        <div style="display:flex;gap:0.5rem;">
+            <input type="text" id="new-ignore" placeholder="pattern e.g. *.json, build/" style="flex:1;margin:0;">
+            <button class="btn" onclick="addIgnore(PROJECT_ID)">Add</button>
+        </div>
+        <p style="font-size:0.78rem;color:#8b949e;margin-top:0.4rem;">Click × to remove a pattern.</p>
+    </div>
+</details>
+
+<div id="file-panel" style="display:none;" class="card">
+    <h2 style="margin-bottom:0.75rem;">Changed Files</h2>
+    <div style="font-size:0.78rem;color:#8b949e;margin-bottom:0.5rem;">Files over 300KB are deselected automatically.</div>
+    <div id="file-list"></div>
+    <div style="margin-top:0.75rem;display:flex;gap:0.5rem;">
+        <a href="#" onclick="toggleAll(true);return false;" style="font-size:0.82rem;color:#58a6ff;">Select all</a>
+        <span style="color:#30363d;">|</span>
+        <a href="#" onclick="toggleAll(false);return false;" style="font-size:0.82rem;color:#58a6ff;">Deselect all</a>
+    </div>
+    <div style="margin-top:1rem;">
+        <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;">
+            <input type="text" id="commit-message" placeholder="Generating AI commit message..." style="flex:1;margin:0;">
+            <button class="btn" id="refresh-msg-btn" onclick="generateCommitMessage(PROJECT_ID)">⟳</button>
+        </div>
+        <div style="display:flex;gap:0.5rem;">
+            <button class="btn btn-primary" id="confirm-btn" onclick="confirmRegenerate(PROJECT_ID)">Build Graph &amp; Commit</button>
+            <button class="btn" onclick="cancelRegenerate()">Cancel</button>
+        </div>
+        <div id="commit-status" style="margin-top:0.5rem;font-size:0.85rem;color:#8b949e;"></div>
+    </div>
+</div>
+
+<div id="graph-search">
+    <input type="text" id="search-input" placeholder="find function by description..."
+           onkeydown="if(event.key==='Enter') searchGraph(PROJECT_ID)">
+    <button class="btn btn-primary" onclick="searchGraph(PROJECT_ID)">Search</button>
+</div>
+<div id="search-results" style="margin-bottom:1rem;"></div>
+
+<div class="svg-container">{{ svg | safe }}</div>
+
+<details style="margin-top:1rem;">
+    <summary style="cursor:pointer;color:#8b949e;font-size:0.85rem;">Raw dot source</summary>
+    <pre style="margin-top:0.5rem;">{{ dot }}</pre>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/residuality.js"></script>
+<script>loadGitignore(PROJECT_ID);</script>
+{% endblock %}

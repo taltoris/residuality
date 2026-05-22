@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Merge — {{ project_id }} — Residuality{% endblock %}
+{% block content %}
+<h1>Merge Commits — {{ project_id }}</h1>
+<div class="card" style="max-width:600px;">
+    <form method="post">
+        <label>Commit A (hash)</label>
+        <input type="text" name="commit_a" placeholder="a3f9b2c1" required>
+        <label>Commit B (hash)</label>
+        <input type="text" name="commit_b" placeholder="b9e7f6a2" required>
+        <label>Reconciliation instruction</label>
+        <textarea name="instruction" rows="3"
+            placeholder="Combine the best elements of both versions, resolving any contradictions..."></textarea>
+        <button type="submit" class="btn btn-primary">Merge via AI</button>
+        <a href="{{ url_for('dag', project_id=project_id) }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
+    </form>
+</div>
+
+<h2 style="margin-top:1.5rem;">Recent Commits</h2>
+<div class="card">
+    <table>
+        <thead><tr><th>Hash</th><th>Message</th><th>Branches</th></tr></thead>
+        <tbody>
+        {% for c in dag_nodes[:20] %}
+        <tr>
+            <td style="font-family:monospace; color:#58a6ff;">
+                <span style="cursor:pointer;" onclick="copyHash('{{ c.short }}')">{{ c.short }}</span>
+            </td>
+            <td>{{ c.message[:80] }}</td>
+            <td>{% for b in c.branches %}<span class="tag">{{ b }}</span>{% endfor %}
+                {% if c.is_merge %}<span class="tag merge">merge</span>{% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyHash(h) {
+    navigator.clipboard.writeText(h).catch(() => {});
+    const inputs = document.querySelectorAll('input[name="commit_a"], input[name="commit_b"]');
+    for (const inp of inputs) {
+        if (!inp.value) { inp.value = h; break; }
+    }
+}
+</script>
+{% endblock %}

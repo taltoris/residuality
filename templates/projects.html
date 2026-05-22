@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Projects — Residuality{% endblock %}
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+    <h1>Projects</h1>
+    <a href="{{ url_for('new_project') }}" class="btn btn-primary">+ New Project</a>
+</div>
+
+{% if projects %}
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>Project</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for p in projects %}
+            <tr>
+                <td>
+                    <a href="{{ url_for('dag', project_id=p.id) }}"
+                       style="color:#58a6ff; text-decoration:none; font-family:monospace;">
+                        {{ p.id }}
+                    </a>
+                </td>
+                <td>
+                    {% if p.initialized %}
+                        <span class="tag" style="color:#3fb950; border-color:#2ea043;">✓ linked</span>
+                    {% else %}
+                        <span class="tag" style="color:#d29922; border-color:#9e6a03;">⚠ not imported</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="{{ url_for('dag',         project_id=p.id) }}" class="btn">DAG</a>
+                    <a href="{{ url_for('chat',        project_id=p.id) }}" class="btn">Chat</a>
+                    <a href="{{ url_for('graph_view',  project_id=p.id) }}" class="btn">Project Control</a>
+                    <a href="{{ url_for('search',      project_id=p.id) }}" class="btn">Search</a>
+                </td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+<p style="font-size:0.8rem; color:#8b949e; margin-top:0.5rem;">
+    Any git repo placed in <code>{{ repos_path }}</code> appears here automatically.
+    Click "Project Control" → "⚙ Build Graph" to initialize an imported repo.
+</p>
+{% else %}
+<div class="card" style="text-align:center; color:#8b949e; padding:2rem;">
+    No projects yet. <a href="{{ url_for('new_project') }}" style="color:#58a6ff;">Create one</a>
+    or place an existing git repo in <code>/repos/</code>.
+</div>
+{% endif %}
+{% endblock %}

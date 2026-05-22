@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  residuality:
+    build: .
+    container_name: residuality
+    restart: unless-stopped
+    ports:
+      - "${RESIDUALITY_PORT:-5010}:5010"
+    volumes:
+      - ./repos:${REPOS_PATH:-/repos}
+      - ./templates:/app/templates
+      - ./static:/app/static
+      - ./app.py:/app/app.py
+      - ./artifact.py:/app/artifact.py
+      - ./indexer.py:/app/indexer.py
+      - ./context.py:/app/context.py
+      - ./owui_client.py:/app/owui_client.py
+      - ./graph.py:/app/graph.py
+      - ~/.ssh:/root/.ssh:ro          # optional — SSH remote support
+    environment:
+      # Flask
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-me}
+      - RESIDUALITY_PORT=${RESIDUALITY_PORT:-5010}
+      - RESIDUALITY_USERNAME=${RESIDUALITY_USERNAME:-admin}
+      - RESIDUALITY_PASSWORD=${RESIDUALITY_PASSWORD:-changeme}
+      # External services
+      - OWUI_URL=${OWUI_URL:-http://192.168.0.100:8282}
+      - OWUI_API_KEY=${OWUI_API_KEY:-}
+      - QDRANT_URL=${QDRANT_URL:-http://192.168.0.100:6333}
+      - EMBED_URL=${EMBED_URL:-http://192.168.0.100:8090}
+      # Storage
+      - REPOS_PATH=/repos
+      # Qdrant collections
+      - QDRANT_COMMITS_COLLECTION=${QDRANT_COMMITS_COLLECTION:-residuality_commits}
+      - QDRANT_GRAPH_COLLECTION=${QDRANT_GRAPH_COLLECTION:-residuality_graph}
+      # Git identity
+      - GIT_USER_NAME=${GIT_USER_NAME:-Residuality}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-residuality@local}
+      # Model IDs
+      - OWUI_MODEL=${OWUI_MODEL:-semantic-router}
+      - SUMMARIZER_MODEL=${SUMMARIZER_MODEL:-bonsai}
+      # Optional — GitHub/GitLab HTTPS remote support
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}

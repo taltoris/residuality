@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Export — {{ project_id }} — Residuality{% endblock %}
+{% block content %}
+<h1>Export — {{ project_id }}</h1>
+<div class="card" style="max-width:500px;">
+    <p style="color:#8b949e; font-size:0.9rem; margin-bottom:1rem;">
+        Strips all <code>&lt;!-- rs:section --&gt;</code> markers from prose files
+        and packages them as a clean zip for publication.
+    </p>
+    <form method="post">
+        <button type="submit" class="btn btn-primary">Export &amp; Download ZIP</button>
+        <a href="{{ url_for('dag', project_id=project_id) }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
+    </form>
+</div>
+{% endblock %}

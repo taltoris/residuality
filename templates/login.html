@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Residuality — Login</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0d1117;
+            color: #c9d1d9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        .login-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 2rem;
+            width: 340px;
+        }
+        h1 { color: #58a6ff; margin-bottom: 1.5rem; font-size: 1.4rem; text-align: center; }
+        label { font-size: 0.85rem; color: #8b949e; display: block; margin-bottom: 0.2rem; }
+        input {
+            width: 100%;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #c9d1d9;
+            padding: 0.5rem 0.7rem;
+            font-family: inherit;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+        input:focus { outline: none; border-color: #58a6ff; }
+        button {
+            width: 100%;
+            padding: 0.6rem;
+            background: #1f6feb;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+        button:hover { background: #388bfd; }
+        .error {
+            color: #f85149;
+            font-size: 0.85rem;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        .tagline {
+            text-align: center;
+            color: #8b949e;
+            font-size: 0.8rem;
+            margin-bottom: 1.5rem;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+<div class="login-box">
+    <h1>⛏ Residuality</h1>
+    <p class="tagline">What remains when everything transient is stripped away.</p>
+    {% if error %}
+        <p class="error">{{ error }}</p>
+    {% endif %}
+    <form method="post">
+        <label>Username</label>
+        <input type="text" name="username" autofocus autocomplete="username">
+        <label>Password</label>
+        <input type="password" name="password" autocomplete="current-password">
+        <button type="submit">Sign in</button>
+    </form>
+</div>
+</body>
+</html>

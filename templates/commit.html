@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Commit {{ commit.short }} — Residuality{% endblock %}
+{% block content %}
+<h1>Commit {{ commit.short }}</h1>
+<div class="card">
+    <p style="color:#8b949e; font-size:0.85rem;">{{ commit.date }}</p>
+    <p style="margin:0.5rem 0; white-space:pre-wrap;">{{ commit.message }}</p>
+    {% if commit.parents %}
+    <p style="font-size:0.82rem; color:#8b949e;">
+        Parents:
+        {% for p in commit.parents %}
+            <a href="{{ url_for('view_commit', project_id=project_id, commit_hash=p) }}"
+               style="color:#58a6ff;">{{ p }}</a>{% if not loop.last %}, {% endif %}
+        {% endfor %}
+    </p>
+    {% endif %}
+    <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
+        <a href="{{ url_for('dag', project_id=project_id) }}" class="btn">← DAG</a>
+    </div>
+</div>
+
+{% for path, content in files.items() %}
+<h2 style="margin-bottom:0.3rem;">{{ path }}</h2>
+<pre>{{ content }}</pre>
+{% endfor %}
+{% endblock %}

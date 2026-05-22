@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}DAG — {{ project_id }} — Residuality{% endblock %}
+
+{% block head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/vis-network.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/vis-network.min.css">
+<style>
+#dag-container {
+    width: 100%;
+    height: 520px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+}
+#commit-detail {
+    display: none;
+    margin-top: 1rem;
+}
+.branch-tag {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border-radius: 10px;
+    font-size: 0.72rem;
+    background: #1a2e1a;
+    border: 1px solid #2ea043;
+    color: #3fb950;
+    margin-left: 0.3rem;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+    <h1>{{ project_id }} — Commit DAG</h1>
+    <a href="{{ url_for('chat', project_id=project_id) }}" class="btn btn-primary">+ Chat</a>
+</div>
+
+<div id="dag-container"></div>
+
+<!-- Branch form (hidden, populated on click) -->
+<div id="commit-detail" class="card">
+    <h2 id="detail-hash" style="font-family:monospace;"></h2>
+    <p id="detail-msg" style="color:#8b949e; margin:0.5rem 0;"></p>
+    <p id="detail-parents" style="font-size:0.82rem; color:#8b949e;"></p>
+    <div style="margin-top:0.75rem; display:flex; gap:0.5rem; flex-wrap:wrap;">
+        <a id="btn-view"   href="#" class="btn">View Files</a>
+        <a id="btn-branch" href="#" class="btn">Branch from here</a>
+        <button id="btn-checkout" class="btn btn-danger"
+                onclick="checkoutCommit()">Checkout</button>
+    </div>
+    <div id="branch-form" style="margin-top:0.75rem; display:none;">
+        <form method="post" action="{{ url_for('create_branch', project_id=project_id) }}">
+            <input type="hidden" name="from_commit" id="branch-from-commit">
+            <input type="text"  name="name"   placeholder="branch-name" style="width:200px; display:inline-block; margin-right:0.5rem;">
+            <input type="text"  name="reason" placeholder="Reason (optional)" style="width:240px; display:inline-block; margin-right:0.5rem;">
+            <button type="submit" class="btn btn-primary">Create Branch</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const DAG_DATA = {{ dag_nodes | tojson }};
+const PROJECT_ID = {{ project_id | tojson }};
+
+const branchColors = {};
+const palette = ['#388bfd','#3fb950','#d29922','#f85149','#a371f7','#fd8c73','#56d364'];
+let colorIdx = 0;
+function branchColor(branches) {
+    const b = (branches && branches.length) ? branches[0] : 'main';
+    if (!branchColors[b]) branchColors[b] = palette[colorIdx++ % palette.length];
+    return branchColors[b];
+}
+
+const nodes = new vis.DataSet(DAG_DATA.map(c => ({
+    id:    c.hash,
+    label: c.short + (c.branches.length ? '\n' + c.branches.join(',') : ''),
+    title: c.message,
+    color: {
+        background: c.is_merge ? '#1a2035' : branchColor(c.branches),
+        border:     c.is_merge ? '#388bfd' : branchColor(c.branches),
+    },
+    shape: c.is_merge ? 'diamond' : 'dot',
+    size:  c.is_merge ? 16 : 12,
+    font:  { color: '#c9d1d9', size: 11, face: 'Courier New' },
+})));
+
+const edges = new vis.DataSet([]);
+DAG_DATA.forEach(c => {
+    c.parents.forEach(p => {
+        edges.add({ from: p, to: c.short, arrows: 'to',
+                    color: { color: '#30363d' } });
+    });
+});
+
+const container = document.getElementById('dag-container');
+const network = new vis.Network(container, { nodes, edges }, {
+    layout:  { hierarchical: { direction: 'LR', sortMethod: 'directed' } },
+    physics: { enabled: false },
+    interaction: { hover: true },
+});
+
+let selectedHash = null;
+network.on('click', function(params) {
+    if (!params.nodes.length) return;
+    selectedHash = params.nodes[0];
+    const commit = DAG_DATA.find(c => c.hash === selectedHash);
+    if (!commit) return;
+
+    document.getElementById('commit-detail').style.display = 'block';
+    document.getElementById('detail-hash').textContent = commit.short +
+        (commit.branches.length ? '  [' + commit.branches.join(', ') + ']' : '') +
+        (commit.is_merge ? '  ⬡ merge' : '');
+    document.getElementById('detail-msg').textContent = commit.message;
+    document.getElementById('detail-parents').textContent =
+        commit.parents.length ? 'Parents: ' + commit.parents.join(', ') : 'Root commit';
+
+    document.getElementById('btn-view').href =
+        `/projects/${PROJECT_ID}/commit/${selectedHash}`;
+    document.getElementById('btn-branch').onclick = () => {
+        const bf = document.getElementById('branch-form');
+        bf.style.display = bf.style.display === 'none' ? 'block' : 'none';
+        document.getElementById('branch-from-commit').value = selectedHash;
+    };
+});
+
+function checkoutCommit() {
+    if (!selectedHash) return;
+    if (!confirm(`Checkout ${selectedHash.slice(0,8)}? This will change your working tree.`)) return;
+    fetch(`/projects/${PROJECT_ID}/checkout/${selectedHash}`, { method: 'POST' })
+        .then(() => location.reload());
+}
+</script>
+{% endblock %}

@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Node — {{ project_id }} — Residuality{% endblock %}
+{% block content %}
+<h1>{{ node.id if node else 'Node not found' }}</h1>
+
+{% if node %}
+<div class="card">
+    <table>
+        <tr><td style="color:#8b949e;width:120px;">Type</td><td>{{ node.type }}</td></tr>
+        <tr><td style="color:#8b949e;">File</td><td>{{ node.file }}</td></tr>
+        <tr><td style="color:#8b949e;">Lines</td><td>{{ node.line_start }} – {{ node.line_end }}</td></tr>
+        {% if node.signature %}
+        <tr><td style="color:#8b949e;">Signature</td><td><code>{{ node.signature }}</code></td></tr>
+        {% endif %}
+        {% if node.label %}
+        <tr><td style="color:#8b949e;">Label</td><td>{{ node.label }}</td></tr>
+        {% endif %}
+    </table>
+</div>
+
+{% if content %}
+<h2>Content</h2>
+<pre>{{ content }}</pre>
+
+<div class="card" style="margin-top:1rem;">
+    <h2>Surgical Edit</h2>
+    <form onsubmit="submitEdit(event)">
+        <label>Instruction</label>
+        <input type="text" id="edit-instruction" placeholder="Fix the null check, make it handle empty strings">
+        <button type="submit" class="btn btn-primary">Edit via AI</button>
+    </form>
+    <div id="edit-result" style="margin-top:0.75rem; display:none;"></div>
+</div>
+{% endif %}
+
+{% if neighbors %}
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem;">
+    {% if neighbors.parents %}
+    <div class="card">
+        <h2>Parents</h2>
+        {% for p in neighbors.parents %}
+        <div><a href="{{ url_for('graph_node', project_id=project_id, node_id=p) }}"
+                style="color:#58a6ff;">{{ p }}</a></div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if neighbors.children %}
+    <div class="card">
+        <h2>Children</h2>
+        {% for c in neighbors.children %}
+        <div><a href="{{ url_for('graph_node', project_id=project_id, node_id=c) }}"
+                style="color:#58a6ff;">{{ c }}</a></div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if neighbors.calls %}
+    <div class="card">
+        <h2>Calls</h2>
+        {% for c in neighbors.calls %}
+        <div><a href="{{ url_for('graph_node', project_id=project_id, node_id=c) }}"
+                style="color:#3fb950;">{{ c }}</a></div>
+        {% endfor %}
+    </div>
+    {% endif %}
+    {% if neighbors.called_by %}
+    <div class="card">
+        <h2>Called By</h2>
+        {% for c in neighbors.called_by %}
+        <div><a href="{{ url_for('graph_node', project_id=project_id, node_id=c) }}"
+                style="color:#d29922;">{{ c }}</a></div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="card" style="color:#8b949e;">Node not found in graph.</div>
+{% endif %}
+
+<a href="{{ url_for('graph_view', project_id=project_id) }}" class="btn" style="margin-top:1rem;">← Graph</a>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PROJECT_ID = {{ project_id | tojson }};
+const NODE_ID    = {{ (node.id if node else '') | tojson }};
+
+function submitEdit(e) {
+    e.preventDefault();
+    const instruction = document.getElementById('edit-instruction').value.trim();
+    if (!instruction) return;
+
+    const form = new FormData();
+    form.append('node_id',     NODE_ID);
+    form.append('instruction', instruction);
+
+    document.getElementById('edit-result').style.display = 'block';
+    document.getElementById('edit-result').innerHTML = '<p style="color:#8b949e;">Editing...</p>';
+
+    fetch(`/projects/${PROJECT_ID}/graph/edit`, { method:'POST', body:form })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                document.getElementById('edit-result').innerHTML =
+                    `<p style="color:#f85149;">Error: ${data.error}</p>`;
+            } else {
+                document.getElementById('edit-result').innerHTML =
+                    `<p style="color:#3fb950;">✓ Committed ${data.commit_hash}</p>
+                     <pre>${data.new_content}</pre>`;
+            }
+        });
+}
+</script>
+{% endblock %}

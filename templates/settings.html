@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Settings — {{ project_id }} — Residuality{% endblock %}
+{% block content %}
+<h1>Settings — {{ project_id }}</h1>
+
+<div class="card" style="max-width:560px;">
+    <h2>Git Remote <span style="color:#8b949e; font-size:0.8rem;">(optional)</span></h2>
+    <p style="font-size:0.82rem; color:#8b949e; margin-bottom:0.75rem;">
+        Link this project to GitHub, GitLab, or any git remote.
+        Not required — local workflow is complete without it.
+    </p>
+
+    {% if remotes %}
+    <table style="margin-bottom:1rem;">
+        <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
+        <tbody>
+        {% for r in remotes %}
+        <tr>
+            <td>{{ r.name }}</td>
+            <td style="font-size:0.82rem; color:#8b949e;">{{ r.url }}</td>
+            <td>
+                <form method="post" style="display:inline;">
+                    <input type="hidden" name="action" value="remove_remote">
+                    <input type="hidden" name="remote_name" value="{{ r.name }}">
+                    <button type="submit" class="btn btn-danger"
+                            onclick="return confirm('Remove remote {{ r.name }}?')">Remove</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#8b949e; font-size:0.85rem; margin-bottom:1rem;">No remotes configured.</p>
+    {% endif %}
+
+    <form method="post">
+        <input type="hidden" name="action" value="add_remote">
+        <label>Remote URL</label>
+        <input type="text" name="remote_url"  placeholder="https://github.com/user/repo.git">
+        <label>Remote Name</label>
+        <input type="text" name="remote_name" placeholder="origin" value="origin">
+        <button type="submit" class="btn btn-primary">Add Remote</button>
+    </form>
+</div>
+
+{% if remotes %}
+<div class="card" style="max-width:560px; margin-top:1rem;">
+    <h2>Push / Pull</h2>
+    <form method="post" style="display:flex; gap:0.5rem; align-items:flex-end; flex-wrap:wrap;">
+        <div style="flex:1; min-width:120px;">
+            <label>Remote</label>
+            <select name="remote_name" style="margin:0;">
+                {% for r in remotes %}<option>{{ r.name }}</option>{% endfor %}
+            </select>
+        </div>
+        <div style="flex:1; min-width:120px;">
+            <label>Branch</label>
+            <input type="text" name="branch" value="main" style="margin:0;">
+        </div>
+        <div style="display:flex; gap:0.5rem;">
+            <button type="submit" name="action" value="push" class="btn btn-primary">Push</button>
+            <button type="submit" name="action" value="pull" class="btn">Pull</button>
+        </div>
+    </form>
+    <p style="font-size:0.78rem; color:#8b949e; margin-top:0.5rem;">
+        HTTPS auth uses <code>GITHUB_TOKEN</code> env var.
+        SSH uses mounted <code>~/.ssh</code> keys.
+    </p>
+</div>
+{% endif %}
+{% endblock %}
