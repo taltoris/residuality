@@ -1,6 +1,6 @@
 """
 indexer.py — Qdrant indexer for Residuality
-Indexes commit messages and graph node signatures for semantic search.
+Per-project collections: res_{project_id}_commits, res_{project_id}_graph
 """
 
 import os
@@ -11,15 +11,20 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-QDRANT_URL              = os.getenv("QDRANT_URL",               "http://192.168.0.100:6333")
-EMBED_URL               = os.getenv("EMBED_URL",                "http://192.168.0.100:8090")
-COMMITS_COLLECTION      = os.getenv("QDRANT_COMMITS_COLLECTION", "residuality_commits")
-GRAPH_COLLECTION        = os.getenv("QDRANT_GRAPH_COLLECTION",   "residuality_graph")
-VECTOR_DIM              = 768
+QDRANT_URL        = os.getenv("QDRANT_URL",  "http://192.168.0.100:6333")
+EMBED_URL         = os.getenv("EMBED_URL",   "http://192.168.0.100:8090")
+COLLECTION_PREFIX = os.getenv("QDRANT_COLLECTION_PREFIX", "res")
+VECTOR_DIM        = 768
+
+
+def commits_collection(project_id: str) -> str:
+    return f"{COLLECTION_PREFIX}_{project_id}_commits"
+
+def graph_collection(project_id: str) -> str:
+    return f"{COLLECTION_PREFIX}_{project_id}_graph"
 
 
 def _embed(text: str) -> Optional[list]:
-    """Embed text via lcpp-embed (nomic-embed-text)."""
     try:
         r = requests.post(
             f"{EMBED_URL}/v1/embeddings",
@@ -29,12 +34,27 @@ def _embed(text: str) -> Optional[list]:
         )
         return r.json()["data"][0]["embedding"]
     except Exception as e:
-        logger.warning(f"Embedding failed: {e}")
+        logger.warning(f"Embed failed: {e}")
         return None
 
 
+def _ensure_collection(name: str) -> None:
+    try:
+        r = requests.get(f"{QDRANT_URL}/collections/{name}", timeout=10)
+        if r.status_code == 404:
+            requests.put(
+                f"{QDRANT_URL}/collections/{name}",
+                json={"vectors": {"dense": {"size": VECTOR_DIM, "distance": "Cosine"}}},
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
+            logger.info(f"Created collection: {name}")
+    except Exception as e:
+        logger.warning(f"Collection check failed for {name}: {e}")
+
+
 def _qdrant_put(collection: str, points: list) -> bool:
-    """Upsert points into a Qdrant collection."""
+    _ensure_collection(collection)
     try:
         r = requests.put(
             f"{QDRANT_URL}/collections/{collection}/points",
@@ -49,19 +69,12 @@ def _qdrant_put(collection: str, points: list) -> bool:
 
 
 def _qdrant_search(collection: str, vector: list,
-                   filters: dict = None, limit: int = 10) -> list:
-    """Semantic search in a Qdrant collection."""
-    payload = {
-        "vector": {"name": "dense", "vector": vector},
-        "limit": limit,
-        "with_payload": True,
-    }
-    if filters:
-        payload["filter"] = filters
+                   limit: int = 10) -> list:
     try:
         r = requests.post(
             f"{QDRANT_URL}/collections/{collection}/points/search",
-            json=payload,
+            json={"vector": {"name": "dense", "vector": vector},
+                  "limit": limit, "with_payload": True},
             headers={"Content-Type": "application/json"},
             timeout=15,
         )
@@ -72,39 +85,14 @@ def _qdrant_search(collection: str, vector: list,
 
 
 def ensure_collections() -> None:
-    """Create Qdrant collections if they don't exist."""
-    schema = {
-        "vectors": {
-            "dense": {
-                "size": VECTOR_DIM,
-                "distance": "Cosine",
-            }
-        },
-        "sparse_vectors": {},
-    }
-    for collection in [COMMITS_COLLECTION, GRAPH_COLLECTION]:
-        try:
-            r = requests.get(f"{QDRANT_URL}/collections/{collection}", timeout=10)
-            if r.status_code == 404:
-                requests.put(
-                    f"{QDRANT_URL}/collections/{collection}",
-                    json=schema,
-                    headers={"Content-Type": "application/json"},
-                    timeout=15,
-                )
-                logger.info(f"Created Qdrant collection: {collection}")
-        except Exception as e:
-            logger.warning(f"Collection check failed for {collection}: {e}")
+    """No-op — collections are created lazily per project."""
+    pass
 
 
 def index_commit(commit_data: dict) -> bool:
-    """
-    Index a commit message in Qdrant for semantic search.
-    commit_data keys: commit_hash, project_id, branch, parent_hashes,
-                      artifact_path, message, timestamp, turn,
-                      model_used, is_merge
-    """
-    message = commit_data.get("message", "")
+    """Index a commit message in the project's commits collection."""
+    project_id = commit_data.get("project_id", "default")
+    message    = commit_data.get("message", "")
     if not message:
         return False
 
@@ -112,17 +100,15 @@ def index_commit(commit_data: dict) -> bool:
     if not vector:
         return False
 
-    point_id = str(uuid.uuid5(
-        uuid.NAMESPACE_DNS,
-        f"commit-{commit_data['commit_hash']}"
-    ))
+    point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS,
+                               f"commit-{commit_data['commit_hash']}"))
 
-    return _qdrant_put(COMMITS_COLLECTION, [{
+    return _qdrant_put(commits_collection(project_id), [{
         "id":      point_id,
         "vector":  {"dense": vector},
         "payload": {
             "commit_hash":   commit_data.get("commit_hash", ""),
-            "project_id":    commit_data.get("project_id", ""),
+            "project_id":    project_id,
             "branch":        commit_data.get("branch", "main"),
             "parent_hashes": commit_data.get("parent_hashes", []),
             "artifact_path": commit_data.get("artifact_path", ""),
@@ -136,12 +122,10 @@ def index_commit(commit_data: dict) -> bool:
 
 
 def index_graph_node(node_data: dict) -> bool:
-    """
-    Index a code/prose graph node in Qdrant for semantic search.
-    node_data keys: id, type, file, project_id, line_start, line_end,
-                    signature (code) or label (prose), docstring
-    """
-    text = node_data.get("signature") or node_data.get("label") or node_data.get("id")
+    """Index a graph node in the project's graph collection."""
+    project_id = node_data.get("project_id", "default")
+    text = (node_data.get("signature") or node_data.get("label")
+            or node_data.get("id", ""))
     if node_data.get("docstring"):
         text = f"{text}\n{node_data['docstring']}"
     if not text:
@@ -151,19 +135,17 @@ def index_graph_node(node_data: dict) -> bool:
     if not vector:
         return False
 
-    point_id = str(uuid.uuid5(
-        uuid.NAMESPACE_DNS,
-        f"node-{node_data['project_id']}-{node_data['id']}"
-    ))
+    point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS,
+                               f"node-{project_id}-{node_data['id']}"))
 
-    return _qdrant_put(GRAPH_COLLECTION, [{
+    return _qdrant_put(graph_collection(project_id), [{
         "id":      point_id,
         "vector":  {"dense": vector},
         "payload": {
             "node_id":    node_data.get("id", ""),
             "type":       node_data.get("type", ""),
             "file":       node_data.get("file", ""),
-            "project_id": node_data.get("project_id", ""),
+            "project_id": project_id,
             "line_start": node_data.get("line_start", 0),
             "line_end":   node_data.get("line_end",   0),
             "signature":  node_data.get("signature",  ""),
@@ -173,18 +155,13 @@ def index_graph_node(node_data: dict) -> bool:
     }])
 
 
-def search_commits(query: str, project_id: Optional[str] = None,
+def search_commits(query: str, project_id: str = "default",
                    limit: int = 10) -> list:
-    """Semantic search over commit messages."""
+    """Semantic search over a project's commit messages."""
     vector = _embed(query)
     if not vector:
         return []
-
-    filters = None
-    if project_id:
-        filters = {"must": [{"key": "project_id", "match": {"value": project_id}}]}
-
-    results = _qdrant_search(COMMITS_COLLECTION, vector, filters, limit)
+    results = _qdrant_search(commits_collection(project_id), vector, limit)
     return [
         {
             "commit_hash":   r["payload"].get("commit_hash"),
@@ -201,18 +178,13 @@ def search_commits(query: str, project_id: Optional[str] = None,
     ]
 
 
-def search_graph_nodes(query: str, project_id: Optional[str] = None,
+def search_graph_nodes(query: str, project_id: str = "default",
                        limit: int = 10) -> list:
-    """Semantic search over code/prose graph nodes."""
+    """Semantic search over a project's code/prose graph nodes."""
     vector = _embed(query)
     if not vector:
         return []
-
-    filters = None
-    if project_id:
-        filters = {"must": [{"key": "project_id", "match": {"value": project_id}}]}
-
-    results = _qdrant_search(GRAPH_COLLECTION, vector, filters, limit)
+    results = _qdrant_search(graph_collection(project_id), vector, limit)
     return [
         {
             "node_id":    r["payload"].get("node_id"),

@@ -76,14 +76,14 @@ function renderFileList(files) {
         const safeId     = 'file_' + f.path.replace(/[^a-zA-Z0-9]/g, '_');
         return `
         <div class="file-row">
-            <input type="checkbox" id="${safeId}" value="${escapeHtml(f.path)}"
-                   ${checked ? 'checked' : ''} ${large ? 'disabled' : ''}>
             <span class="file-status ${statusCls}">${statusLbl}</span>
             <label for="${safeId}" class="${large ? 'large-file' : ''}"
                    style="flex:1; cursor:pointer; font-family:monospace;">
                 ${escapeHtml(f.path)}
             </label>
             <span class="file-size">${sizeStr}${large ? ' — skipped' : ''}</span>
+            <input type="checkbox" id="${safeId}" value="${escapeHtml(f.path)}"
+                   ${checked ? 'checked' : ''} ${large ? 'disabled' : ''}>
         </div>`;
     }).join('');
 }
@@ -188,11 +188,11 @@ function generateCommitMessage(projectId) {
 }
 
 function cancelRegenerate() {
-    const panel  = document.getElementById('file-panel');
-    const status = document.getElementById('regen-status');
+    const panel        = document.getElementById('file-panel');
+    const status       = document.getElementById('regen-status');
     const commitStatus = document.getElementById('commit-status');
-    if (panel)  panel.style.display  = 'none';
-    if (status) status.style.display = 'none';
+    if (panel)        panel.style.display  = 'none';
+    if (status)       status.style.display = 'none';
     if (commitStatus) commitStatus.textContent = '';
 }
 
@@ -280,7 +280,7 @@ function sendChatMessage(projectId) {
         <div class="content">${escapeHtml(msg)}</div></div>
         <div class="msg assistant" id="pending">
         <div class="role">Residuality</div>
-        <div class="content" style="color:#8b949e;">Thinking...</div></div>`;
+        <div class="content" style="color:#8b949e;">Thinking... (local models may take a minute)</div></div>`;
     messages.scrollTop = messages.scrollHeight;
     input.value = '';
     if (sendBtn) sendBtn.disabled = true;
@@ -290,7 +290,10 @@ function sendChatMessage(projectId) {
     if (artifact) form.append('artifact_path', artifact.value);
 
     fetch(`/projects/${projectId}/chat`, { method: 'POST', body: form })
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) return r.text().then(t => { throw new Error('Server error ' + r.status + ': ' + t.slice(0, 200)); });
+            return r.json();
+        })
         .then(data => {
             const pending = document.getElementById('pending');
             if (pending) pending.querySelector('.content').textContent =
@@ -300,7 +303,68 @@ function sendChatMessage(projectId) {
         })
         .catch(e => {
             const pending = document.getElementById('pending');
-            if (pending) pending.querySelector('.content').textContent = 'Error: ' + e;
+            if (pending) pending.querySelector('.content').textContent = 'Error: ' + e.message;
             if (sendBtn) sendBtn.disabled = false;
         });
 }
+
+// ── Graph drill-down and external imports toggle ──────────────────────────
+
+var _showExternal = false;
+
+function wireGraphClicks() {
+    document.querySelectorAll('.svg-container a').forEach(function(a) {
+        a.addEventListener('click', function(e) {
+            e.preventDefault();
+            var title = a.querySelector('title');
+            if (title) {
+                drillDown(title.textContent.trim());
+            }
+        });
+    });
+}
+
+function toggleExternalImports(projectId) {
+    _showExternal = !_showExternal;
+    var btn = document.getElementById('toggle-external-btn');
+    if (btn) btn.textContent = _showExternal ? '− Hide pip imports' : '+ Show pip imports';
+    loadFileGraph(projectId);
+}
+
+function loadFileGraph(projectId) {
+    var container = document.querySelector('.svg-container');
+    var status    = document.getElementById('regen-status');
+    setStatus(status, 'Rendering...', '#8b949e');
+
+    fetch('/projects/' + projectId + '/graph/svg?external=' + _showExternal)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            status.style.display = 'none';
+            container.innerHTML  = data.svg;
+            wireGraphClicks();
+        })
+        .catch(function(e) { setStatus(status, 'Error: ' + e, '#f85149'); });
+}
+
+function drillDown(projectId, filepath) {
+    var status    = document.getElementById('regen-status');
+    var container = document.querySelector('.svg-container');
+    var backBtn   = document.getElementById('back-btn');
+    var toggleBtn = document.getElementById('toggle-external-btn');
+    setStatus(status, 'Loading ' + filepath + '...', '#8b949e');
+
+    fetch('/projects/' + projectId + '/graph/file/' + encodeURIComponent(filepath))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            status.style.display = 'none';
+            container.innerHTML  = data.svg;
+            if (backBtn)   backBtn.style.display   = 'inline-block';
+            if (toggleBtn) toggleBtn.style.display = 'none';
+        })
+        .catch(function(e) { setStatus(status, 'Error: ' + e, '#f85149'); });
+}
+
+// Wire clicks on initial page load
+document.addEventListener('DOMContentLoaded', function() {
+    wireGraphClicks();
+});

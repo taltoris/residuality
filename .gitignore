@@ -11,4 +11,5 @@ dist/
 *.log
 export/
 repos/
+repos/*
 .DS_Store

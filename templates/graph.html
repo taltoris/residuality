@@ -1,10 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Project Control — {{ project_id }} — Residuality{% endblock %}
 {% block head %}
-<script>const PROJECT_ID = {{ project_id | tojson }};</script>
 <style>
-#graph-search { display:flex; gap:0.5rem; margin-bottom:1rem; }
-#graph-search input { flex:1; margin:0; }
 .svg-container { overflow:auto; background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:0.5rem; }
 .svg-container svg { max-width:100%; height:auto; }
 .file-row { display:flex; align-items:center; gap:0.5rem; padding:0.3rem 0; border-bottom:1px solid #21262d; font-size:0.85rem; }
@@ -25,56 +22,59 @@
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
     <h1>Project Control — {{ project_id }}</h1>
     <div style="display:flex;gap:0.5rem;">
-        <button class="btn" id="build-all-btn" onclick="buildGraphAll(PROJECT_ID)">⚙ Build Graph</button>
-        <button class="btn btn-primary" id="regen-btn" onclick="startRegenerate(PROJECT_ID)">↺ Regenerate &amp; Commit</button>
+        <button class="btn" id="build-all-btn">&#9881; Build Graph</button>
+        <button class="btn btn-primary" id="regen-btn">&#8635; Regenerate &amp; Commit</button>
+        <button class="btn" id="plan-btn">&#x1F9E0; Plan</button>
     </div>
 </div>
 
 <div id="regen-status" style="display:none;margin-bottom:0.75rem;font-size:0.9rem;"></div>
 
 <details style="margin-bottom:1rem;">
-    <summary style="cursor:pointer;color:#8b949e;font-size:0.9rem;padding:0.5rem 0;">▶ .gitignore</summary>
+    <summary style="cursor:pointer;color:#8b949e;font-size:0.9rem;padding:0.5rem 0;">&#9654; .gitignore</summary>
     <div class="card" style="margin-top:0.5rem;">
         <div id="ignore-tags" style="display:flex;flex-wrap:wrap;gap:0.4rem;margin-bottom:0.75rem;"></div>
         <div style="display:flex;gap:0.5rem;">
             <input type="text" id="new-ignore" placeholder="pattern e.g. *.json, build/" style="flex:1;margin:0;">
-            <button class="btn" onclick="addIgnore(PROJECT_ID)">Add</button>
+            <button class="btn" id="add-ignore-btn">Add</button>
         </div>
-        <p style="font-size:0.78rem;color:#8b949e;margin-top:0.4rem;">Click × to remove a pattern.</p>
     </div>
 </details>
 
 <div id="file-panel" style="display:none;" class="card">
     <h2 style="margin-bottom:0.75rem;">Changed Files</h2>
-    <div style="font-size:0.78rem;color:#8b949e;margin-bottom:0.5rem;">Files over 300KB are deselected automatically.</div>
     <div id="file-list"></div>
     <div style="margin-top:0.75rem;display:flex;gap:0.5rem;">
-        <a href="#" onclick="toggleAll(true);return false;" style="font-size:0.82rem;color:#58a6ff;">Select all</a>
+        <a href="#" id="select-all-link" style="font-size:0.82rem;color:#58a6ff;">Select all</a>
         <span style="color:#30363d;">|</span>
-        <a href="#" onclick="toggleAll(false);return false;" style="font-size:0.82rem;color:#58a6ff;">Deselect all</a>
+        <a href="#" id="deselect-all-link" style="font-size:0.82rem;color:#58a6ff;">Deselect all</a>
     </div>
     <div style="margin-top:1rem;">
         <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;">
             <input type="text" id="commit-message" placeholder="Generating AI commit message..." style="flex:1;margin:0;">
-            <button class="btn" id="refresh-msg-btn" onclick="generateCommitMessage(PROJECT_ID)">⟳</button>
+            <button class="btn" id="refresh-msg-btn">&#8635;</button>
         </div>
         <div style="display:flex;gap:0.5rem;">
-            <button class="btn btn-primary" id="confirm-btn" onclick="confirmRegenerate(PROJECT_ID)">Build Graph &amp; Commit</button>
-            <button class="btn" onclick="cancelRegenerate()">Cancel</button>
+            <button class="btn btn-primary" id="confirm-btn">Build Graph &amp; Commit</button>
+            <button class="btn" id="cancel-btn">Cancel</button>
         </div>
         <div id="commit-status" style="margin-top:0.5rem;font-size:0.85rem;color:#8b949e;"></div>
     </div>
 </div>
 
-<div id="graph-search">
-    <input type="text" id="search-input" placeholder="find function by description..."
-           onkeydown="if(event.key==='Enter') searchGraph(PROJECT_ID)">
-    <button class="btn btn-primary" onclick="searchGraph(PROJECT_ID)">Search</button>
+<div style="display:flex;gap:0.5rem;margin-bottom:1rem;">
+    <input type="text" id="search-input" placeholder="find function by description..." style="flex:1;margin:0;">
+    <button class="btn btn-primary" id="search-btn">Search</button>
 </div>
 <div id="search-results" style="margin-bottom:1rem;"></div>
 
-<div class="svg-container">{{ svg | safe }}</div>
+<div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;">
+    <button class="btn" id="back-btn" style="display:none;">&#8592; All Files</button>
+    <button class="btn" id="toggle-external-btn">+ Show pip imports</button>
+</div>
 
+<div class="svg-container">{{ svg | safe }}</div>
+<div id="plan-output"></div>
 <details style="margin-top:1rem;">
     <summary style="cursor:pointer;color:#8b949e;font-size:0.85rem;">Raw dot source</summary>
     <pre style="margin-top:0.5rem;">{{ dot }}</pre>
@@ -83,5 +83,300 @@
 
 {% block scripts %}
 <script src="/static/residuality.js"></script>
-<script>loadGitignore(PROJECT_ID);</script>
+<script>
+(function() {
+    var PID = {{ project_id | tojson }};
+    var SIZE_LIMIT = 300 * 1024;
+
+    function esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    function fmtSize(b) {
+        if (b > 1048576) return (b/1048576).toFixed(1)+'MB';
+        if (b > 1024)    return (b/1024).toFixed(0)+'KB';
+        return b+'B';
+    }
+    function setStatus(el, msg, color) {
+        el.style.display = 'block';
+        el.style.color   = color || '#8b949e';
+        el.textContent   = msg;
+    }
+
+    // ── .gitignore ─────────────────────────────────────────────────────────
+    function loadGitignore() {
+        fetch('/projects/'+PID+'/gitignore')
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                var c = document.getElementById('ignore-tags');
+                c.innerHTML = (data.entries || []).map(function(e) {
+                    return '<span class="ignore-tag">'+esc(e)+
+                           ' <button data-pat="'+esc(e)+'">x</button></span>';
+                }).join('');
+                c.querySelectorAll('button').forEach(function(btn){
+                    btn.addEventListener('click', function(){
+                        removeIgnore(this.dataset.pat);
+                    });
+                });
+            })
+            .catch(function(e){ console.error('gitignore:', e); });
+    }
+    function addIgnore() {
+        var inp = document.getElementById('new-ignore');
+        var pat = inp.value.trim();
+        if (!pat) return;
+        var fd = new FormData();
+        fd.append('pattern', pat);
+        fetch('/projects/'+PID+'/gitignore/add', {method:'POST',body:fd})
+            .then(function(){ inp.value=''; loadGitignore(); });
+    }
+    function removeIgnore(pat) {
+        var fd = new FormData();
+        fd.append('pattern', pat);
+        fetch('/projects/'+PID+'/gitignore/remove', {method:'POST',body:fd})
+            .then(function(){ loadGitignore(); });
+    }
+    document.getElementById('add-ignore-btn').addEventListener('click', addIgnore);
+    document.getElementById('new-ignore').addEventListener('keydown', function(e){
+        if (e.key==='Enter') addIgnore();
+    });
+    loadGitignore();
+
+    // ── Build Graph ────────────────────────────────────────────────────────
+    document.getElementById('build-all-btn').addEventListener('click', function() {
+        var btn    = this;
+        var status = document.getElementById('regen-status');
+        btn.disabled    = true;
+        btn.textContent = 'Building...';
+        setStatus(status, 'Running tree-sitter over all files...', '#8b949e');
+
+        fetch('/projects/'+PID+'/graph/build_all', {method:'POST'})
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                if (data.status === 'ok' || data.status === 'partial') {
+                    var errs = data.errors && data.errors.length;
+                    setStatus(status,
+                        'Built graph from '+data.processed+' files'+
+                        (errs ? ' ('+data.errors.length+' errors: '+data.errors.slice(0,2).join('; ')+')' : '')+
+                        ' reloading...',
+                        errs ? '#d29922' : '#3fb950');
+                    setTimeout(function(){ location.reload(); }, 1200);
+                } else {
+                    setStatus(status, 'Error: '+JSON.stringify(data), '#f85149');
+                    btn.disabled    = false;
+                    btn.textContent = 'Build Graph';
+                }
+            })
+            .catch(function(e) {
+                setStatus(status, 'Fetch error: '+e, '#f85149');
+                btn.disabled    = false;
+                btn.textContent = 'Build Graph';
+            });
+    });
+
+    // ── Regenerate & Commit ────────────────────────────────────────────────
+    document.getElementById('regen-btn').addEventListener('click', function() {
+        var btn    = this;
+        var status = document.getElementById('regen-status');
+        btn.disabled    = true;
+        btn.textContent = 'Loading...';
+        setStatus(status, 'Fetching git status...', '#8b949e');
+
+        fetch('/projects/'+PID+'/git_status')
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                status.style.display = 'none';
+                btn.disabled    = false;
+                btn.textContent = 'Regenerate & Commit';
+
+                if (!data.files || !data.files.length) {
+                    setStatus(status, 'No changed files - working tree clean.', '#8b949e');
+                    return;
+                }
+                var fl = document.getElementById('file-list');
+                fl.innerHTML = data.files.map(function(f) {
+                    var large   = f.size > SIZE_LIMIT;
+                    var scls    = f.status === '??' ? 'Q' : (f.status.trim()[0]||'M');
+                    var slbl    = f.status === '??' ? 'new' : f.status.trim();
+                    var sid     = 'fi_'+f.path.replace(/[^a-zA-Z0-9]/g,'_');
+                    return '<div class="file-row">'+
+                        '<span class="file-status '+scls+'">'+slbl+'</span>'+
+                        '<label for="'+sid+'" class="'+(large?'large-file':'')+'\" style="flex:1;cursor:pointer;font-family:monospace;">'+esc(f.path)+'</label>'+
+                        '<span class="file-size">'+fmtSize(f.size)+(large?' skipped':'')+' </span>'+
+                        '<input type="checkbox" id="'+sid+'" value="'+esc(f.path)+'"'+
+                        (large ? ' disabled' : ' checked')+'>'+
+                        '</div>';
+                }).join('');
+                document.getElementById('file-panel').style.display = 'block';
+                generateMsg();
+            })
+            .catch(function(e) {
+                setStatus(status, 'Error: '+e, '#f85149');
+                btn.disabled    = false;
+                btn.textContent = 'Regenerate & Commit';
+            });
+    });
+   document.getElementById('plan-btn').addEventListener('click', function() {
+    var btn = this;
+    var status = document.getElementById('regen-status');
+    btn.disabled = true;
+    btn.textContent = 'Thinking...';
+    setStatus(status, 'Asking Sage to assess project state...', '#8b949e');
+
+    fetch('/projects/' + PID + '/plan', {method: 'POST'})
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            btn.disabled = false;
+            btn.textContent = 'Plan';
+            status.style.display = 'none';
+            document.getElementById('plan-output').innerHTML =
+                '<div class="card" style="margin-top:1rem;">' +
+                '<h2 style="margin-bottom:0.75rem;">&#x1F9E0; Sage\'s Assessment</h2>' +
+                '<p><strong>Assessment:</strong> ' + data.assessment + '</p>' +
+                '<p><strong>Next task:</strong> ' + data.next_task + '</p>' +
+                '<p><strong>Approach:</strong> ' + data.approach + '</p>' +
+                (data.files_to_touch.length ? '<p><strong>Files:</strong> ' + data.files_to_touch.join(', ') + '</p>' : '') +
+                (data.risks ? '<p><strong>Risks:</strong> ' + data.risks + '</p>' : '') +
+                (data.open_questions.length ? '<p><strong>Open questions:</strong> ' + data.open_questions.join('; ') + '</p>' : '') +
+                '</div>';
+          })
+        .catch(function(e) {
+            btn.disabled = false;
+            btn.textContent = 'Plan';
+            setStatus(status, 'Plan error: ' + e, '#f85149');
+        });
+    });
+    function generateMsg() {
+        var inp = document.getElementById('commit-message');
+        var btn = document.getElementById('refresh-msg-btn');
+        inp.value = ''; inp.placeholder = 'Generating...'; btn.disabled = true;
+        fetch('/projects/'+PID+'/suggest_commit_message', {method:'POST'})
+            .then(function(r){ return r.json(); })
+            .then(function(d){ inp.value=d.message||'Update files'; inp.placeholder='Commit message...'; btn.disabled=false; })
+            .catch(function(){ inp.value='Update files'; inp.placeholder='Commit message...'; btn.disabled=false; });
+    }
+    document.getElementById('refresh-msg-btn').addEventListener('click', generateMsg);
+
+    document.getElementById('select-all-link').addEventListener('click', function(e){
+        e.preventDefault();
+        document.querySelectorAll('#file-list input:not(:disabled)').forEach(function(cb){ cb.checked=true; });
+    });
+    document.getElementById('deselect-all-link').addEventListener('click', function(e){
+        e.preventDefault();
+        document.querySelectorAll('#file-list input:not(:disabled)').forEach(function(cb){ cb.checked=false; });
+    });
+    document.getElementById('cancel-btn').addEventListener('click', function(){
+        document.getElementById('file-panel').style.display = 'none';
+        document.getElementById('regen-status').style.display = 'none';
+        document.getElementById('commit-status').textContent = '';
+    });
+
+    document.getElementById('confirm-btn').addEventListener('click', function() {
+        var files = Array.from(document.querySelectorAll('#file-list input:checked')).map(function(cb){ return cb.value; });
+        var msg   = document.getElementById('commit-message').value.trim() || 'Update files';
+        var status = document.getElementById('commit-status');
+        var btn    = this;
+        if (!files.length) { setStatus(status,'No files selected.','#f85149'); return; }
+        btn.disabled = true;
+        setStatus(status, 'Building graph and committing...', '#8b949e');
+        var fd = new FormData();
+        fd.append('message', msg);
+        files.forEach(function(f){ fd.append('files', f); });
+        fetch('/projects/'+PID+'/graph/regenerate_and_commit', {method:'POST',body:fd})
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                if (data.status === 'ok') {
+                    setStatus(status,'Committed '+data.hash+' reloading...','#3fb950');
+                    setTimeout(function(){ location.reload(); }, 1000);
+                } else {
+                    setStatus(status,'Error: '+(data.error||JSON.stringify(data.errors)),'#f85149');
+                    btn.disabled = false;
+                }
+            })
+            .catch(function(e){ setStatus(status,'Error: '+e,'#f85149'); btn.disabled=false; });
+    });
+
+    // ── Graph search ───────────────────────────────────────────────────────
+    function doSearch() {
+        var q = document.getElementById('search-input').value.trim();
+        if (!q) return;
+        var fd = new FormData(); fd.append('query', q);
+        fetch('/projects/'+PID+'/graph/search', {method:'POST',body:fd})
+            .then(function(r){ return r.json(); })
+            .then(function(results) {
+                var div = document.getElementById('search-results');
+                if (!results.length) { div.innerHTML='<p style="color:#8b949e;">No results.</p>'; return; }
+                div.innerHTML = '<div class="card"><table>'+
+                    '<tr><th>Score</th><th>Node</th><th>Location</th><th></th></tr>'+
+                    results.map(function(r){
+                        return '<tr><td style="color:#8b949e;font-size:0.8rem;">'+r.score+'</td>'+
+                            '<td style="font-family:monospace;font-size:0.82rem;color:#58a6ff;">'+esc(r.node_id)+'</td>'+
+                            '<td style="font-size:0.82rem;color:#8b949e;">'+esc(r.file)+':'+r.line_start+'-'+r.line_end+'</td>'+
+                            '<td><a href="/projects/'+PID+'/graph/node/'+encodeURIComponent(r.node_id)+'" class="btn">View</a></td></tr>';
+                    }).join('')+'</table></div>';
+            });
+    }
+    document.getElementById('search-btn').addEventListener('click', doSearch);
+    document.getElementById('search-input').addEventListener('keydown', function(e){
+        if (e.key==='Enter') doSearch();
+    });
+
+    // ── Graph drill-down ───────────────────────────────────────────────────
+    var _showExternal = false;
+
+    function drillDown(filepath) {
+        var status    = document.getElementById('regen-status');
+        var container = document.querySelector('.svg-container');
+        var backBtn   = document.getElementById('back-btn');
+        var toggleBtn = document.getElementById('toggle-external-btn');
+        setStatus(status, 'Loading '+filepath+'...', '#8b949e');
+
+        fetch('/projects/'+PID+'/graph/file/'+encodeURIComponent(filepath))
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                status.style.display = 'none';
+                container.innerHTML  = data.svg;
+                if (backBtn)   backBtn.style.display   = 'inline-block';
+                if (toggleBtn) toggleBtn.style.display = 'none';
+                wireGraphClicks();
+            })
+            .catch(function(e){ setStatus(status, 'Error: '+e, '#f85149'); });
+    }
+
+    function wireGraphClicks() {
+        document.querySelectorAll('.svg-container a').forEach(function(a) {
+            a.addEventListener('click', function(e) {
+                e.preventDefault();
+                var title = a.querySelector('title');
+                if (title) drillDown(title.textContent.trim());
+            });
+        });
+    }
+
+    document.getElementById('toggle-external-btn').addEventListener('click', function() {
+        _showExternal = !_showExternal;
+        this.textContent = _showExternal ? '- Hide pip imports' : '+ Show pip imports';
+        var status    = document.getElementById('regen-status');
+        var container = document.querySelector('.svg-container');
+        setStatus(status, 'Rendering...', '#8b949e');
+        fetch('/projects/'+PID+'/graph/svg?external='+_showExternal)
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                status.style.display = 'none';
+                container.innerHTML  = data.svg;
+                wireGraphClicks();
+            })
+            .catch(function(e){ setStatus(status, 'Error: '+e, '#f85149'); });
+    });
+
+    document.getElementById('back-btn').addEventListener('click', function() {
+        this.style.display = 'none';
+        document.getElementById('toggle-external-btn').style.display = 'inline-block';
+        location.reload();
+    });
+
+    // Wire clicks on initial SVG
+    wireGraphClicks();
+
+})();
+</script>
 {% endblock %}

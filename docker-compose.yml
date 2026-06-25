@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   residuality:
     build: .
@@ -12,6 +10,7 @@ services:
       - ./templates:/app/templates
       - ./static:/app/static
       - ./app.py:/app/app.py
+      - ./snapshot.py:/app/snapshot.py
       - ./artifact.py:/app/artifact.py
       - ./indexer.py:/app/indexer.py
       - ./context.py:/app/context.py

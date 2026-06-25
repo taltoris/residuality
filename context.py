@@ -1,22 +1,21 @@
 """
 context.py — Context Compression Pipeline
 Builds compressed context for model calls.
-Models never see full conversation history — only rolling summary + last exchange + current artifact.
+
+Memory model:
+  - Long term:      rolling summary + Qdrant episodic snapshots
+  - Associative:    Qdrant commit/node search results
+  - Working memory: last N full exchanges (immediate context)
+  - Ground truth:   relevant code/prose node content
 """
 
-import os
 import logging
 from typing import Optional
-from indexer import search_commits
 
 logger = logging.getLogger(__name__)
 
 
 class ContextBuilder:
-    """
-    Builds the messages array sent to the model for each turn.
-    Implements the rolling summary + last exchange + current artifact pattern.
-    """
 
     def build_chat_context(
         self,
@@ -27,67 +26,76 @@ class ContextBuilder:
         artifact_content: Optional[str] = None,
         artifact_path: Optional[str] = None,
         relevant_commits: Optional[list] = None,
+        relevant_nodes: Optional[list] = None,
+        relevant_snapshots: Optional[list] = None,
+        recent_exchanges: Optional[list] = None,
+        max_recent_exchanges: int = 3,
     ) -> list:
         """
-        Build the messages list to send to Open WebUI.
+        Build a stateless compressed context for each Open WebUI request.
 
-        Returns a list of {role, content} dicts.
-        Structure:
-          [system: context + artifact]
-          [assistant: last response]  (if last_exchange present)
-          [user: current message]
+        Memory model:
+          - Long term:      rolling summary + Qdrant semantic search
+          - Working memory: last N full exchanges (immediate context, full fidelity)
+          - Ground truth:   relevant code/prose node (not the whole file)
         """
         system_parts = []
 
-        # Rolling summary
+        # Rolling summary — long term memory
         if rolling_summary:
-            system_parts.append(
-                f"## Conversation Summary\n{rolling_summary}"
-            )
+            system_parts.append(f"## Conversation Summary\n{rolling_summary}")
 
-        # Relevant historical commits (from Qdrant search)
+        # Episodic snapshots — state-of-affairs at key commit moments
+        if relevant_snapshots:
+            from snapshot import format_snapshot_for_context
+            snap_lines = "\n\n".join([
+                format_snapshot_for_context(s) for s in relevant_snapshots[:3]
+            ])
+            system_parts.append(f"## Relevant Project Snapshots\n{snap_lines}")
+
+        # Relevant commit history from Qdrant
         if relevant_commits:
             commit_lines = "\n".join([
-                f"- [{c['commit_hash'][:8]}] {c['message']} (branch: {c['branch']})"
+                f"- [{c['commit_hash'][:8]}] {c['message']} "
+                f"(branch: {c['branch']}, score: {c['score']})"
                 for c in relevant_commits[:5]
             ])
-            system_parts.append(
-                f"## Relevant History\n{commit_lines}"
-            )
+            system_parts.append(f"## Relevant Commit History\n{commit_lines}")
 
-        # Current artifact
+        # Relevant code/prose nodes from Qdrant
+        if relevant_nodes:
+            node_lines = "\n".join([
+                f"- {n['node_id']} [{n['type']}] "
+                f"{n['file']}:{n['line_start']}-{n['line_end']} (score: {n['score']})"
+                for n in relevant_nodes[:5]
+            ])
+            system_parts.append(f"## Relevant Code Locations\n{node_lines}")
+
+        # Current node/artifact — the relevant section, not the whole file
         if artifact_content and artifact_path:
             system_parts.append(
-                f"## Current Artifact: {artifact_path}\n```\n{artifact_content}\n```"
+                f"## Current Context: {artifact_path}\n```\n{artifact_content}\n```"
             )
 
         messages = []
-
         if system_parts:
             messages.append({
-                "role": "system",
+                "role":    "system",
                 "content": "\n\n".join(system_parts)
             })
 
-        # Last exchange (compressed — just the previous turn)
-        if last_exchange:
-            if last_exchange.get("user"):
-                messages.append({
-                    "role": "user",
-                    "content": last_exchange["user"]
-                })
-            if last_exchange.get("assistant"):
-                messages.append({
-                    "role": "assistant",
-                    "content": last_exchange["assistant"]
-                })
+        # Recent exchanges — immediate working memory, full fidelity
+        # Use recent_exchanges if provided, fall back to last_exchange for compat
+        exchanges = recent_exchanges or ([last_exchange] if last_exchange else [])
+        exchanges = exchanges[-max_recent_exchanges:]
+        for exchange in exchanges:
+            if exchange.get("user"):
+                messages.append({"role": "user",      "content": exchange["user"]})
+            if exchange.get("assistant"):
+                messages.append({"role": "assistant", "content": exchange["assistant"]})
 
-        # Current user message
-        messages.append({
-            "role": "user",
-            "content": user_message
-        })
-
+        # Current message
+        messages.append({"role": "user", "content": user_message})
         return messages
 
     def build_edit_context(
@@ -100,10 +108,7 @@ class ContextBuilder:
         line_start: Optional[int] = None,
         line_end: Optional[int] = None,
     ) -> list:
-        """
-        Build context for a surgical node edit.
-        Model sees only the target function/section + instruction.
-        """
+        """Build context for a surgical node edit."""
         system_parts = [
             "You are editing a specific section of code or prose. "
             "Return ONLY the replacement content, no explanations, no markdown fences."
@@ -118,7 +123,7 @@ class ContextBuilder:
             )
 
         messages = [{
-            "role": "system",
+            "role":    "system",
             "content": "\n\n".join(system_parts)
         }]
 
@@ -141,9 +146,7 @@ class ContextBuilder:
         instruction: str,
         rolling_summary: Optional[str] = None,
     ) -> list:
-        """
-        Build context for a model-assisted merge reconciliation.
-        """
+        """Build context for a model-assisted merge reconciliation."""
         system_parts = [
             "You are reconciling two divergent versions of an artifact. "
             "Produce a single coherent version that harmoniously combines the best of both."
@@ -153,7 +156,7 @@ class ContextBuilder:
             system_parts.append(f"## Project Context\n{rolling_summary}")
 
         messages = [{
-            "role": "system",
+            "role":    "system",
             "content": "\n\n".join(system_parts)
         }]
 
@@ -176,12 +179,8 @@ class ContextBuilder:
         for msg in messages:
             content = msg.get("content", "")
             if isinstance(content, list):
-                text_only = [
-                    item for item in content
-                    if item.get("type") != "image_url"
-                ]
                 text_parts = [
-                    item.get("text", "") for item in text_only
+                    item.get("text", "") for item in content
                     if item.get("type") == "text"
                 ]
                 cleaned.append({**msg, "content": " ".join(text_parts)})
