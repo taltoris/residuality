@@ -23,6 +23,7 @@ class OWUIClient:
     def __init__(self):
         self.base_url         = OWUI_URL.rstrip("/")
         self.api_key          = OWUI_API_KEY
+        self.DEFAULT_MODEL    = DEFAULT_MODEL
         self.SUMMARIZER_MODEL = SUMMARIZER_MODEL
         self.PLANNER_MODEL    = PLANNER_MODEL
         self.headers          = {"Content-Type": "application/json"}

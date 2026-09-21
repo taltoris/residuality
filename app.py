@@ -293,47 +293,6 @@ def chat(project_id: str):
                            summary=state.get("summary"),
                            history=state.get("history", []))
 
-@app.route("/projects/<project_id>/plan", methods=["POST"])
-@login_required
-def plan(project_id: str):
-    """Ask the planner model to assess project state and suggest next steps."""
-    repo  = get_repo(project_id)
-    state = _conversation_state.get(project_id, {})
-
-    # Get most recent snapshot from Qdrant
-    recent_snapshots = search_snapshots("current state", project_id=project_id, limit=1)
-    snapshot_text = None
-    if recent_snapshots:
-        from snapshot import format_snapshot_for_context
-        snapshot_text = format_snapshot_for_context(recent_snapshots[0])
-
-    # Get graph summary — file list + import structure
-    dot_path = repo.repo_path / ".residuality" / "graph.dot"
-    graph_summary = None
-    if dot_path.exists():
-        from graph import load_graph
-        g = load_graph(str(dot_path))
-        if g:
-            files = [
-                n.get_name().strip('"')
-                for n in g.get_nodes()
-                if n.get_attributes().get("type", "").strip('"') in ("file", "chapter")
-            ]
-            graph_summary = "Files: " + ", ".join(sorted(files))
-
-    # Recent commits
-    from indexer import search_commits
-    recent_commits = search_commits("recent changes", project_id=project_id, limit=5)
-
-    plan_result = owui.generate_plan(
-        project_id=project_id,
-        snapshot=snapshot_text or state.get("summary"),
-        graph_summary=graph_summary,
-        recent_commits=recent_commits,
-    )
-
-    return jsonify(plan_result)
-
 
 @app.route("/projects/<project_id>/chat", methods=["POST"])
 @login_required
@@ -962,6 +921,138 @@ def settings(project_id: str):
     remotes = repo.get_remotes()
     return render_template("settings.html", project_id=project_id, remotes=remotes)
 
+@app.route("/projects/<project_id>/graph/tree")
+@login_required
+def graph_tree(project_id: str):
+    """
+    Return the full project tree as JSON for the React graph explorer.
+    Includes: directory structure, file nodes, internal structure, import edges.
+    """
+    repo     = get_repo(project_id)
+    dot_path = str(repo.repo_path / ".residuality" / "graph.dot")
+    graph    = load_graph(dot_path)
+
+    # Build directory tree from filesystem
+    def build_tree(path: Path, rel: str = "") -> dict:
+        node = {
+            "name":     path.name,
+            "path":     rel or path.name,
+            "type":     "directory" if path.is_dir() else "file",
+            "children": [],
+        }
+        if path.is_dir():
+            skip = {'.git', '.residuality', '__pycache__', 'node_modules', 'export'}
+            for child in sorted(path.iterdir()):
+                if child.name in skip or child.name.startswith('.'):
+                    continue
+                rel_child = str(child.relative_to(repo.repo_path))
+                node["children"].append(build_tree(child, rel_child))
+        return node
+
+    tree = build_tree(repo.repo_path)
+
+    # Build node map from graph.dot — internal structure per file
+    file_nodes = {}   # filepath -> list of internal nodes
+    import_edges = [] # {from, to, label}
+
+    if graph:
+        for node in graph.get_nodes():
+            attrs    = node.get_attributes()
+            nid      = node.get_name().strip('"')
+            ntype    = attrs.get("type",       "").strip('"')
+            nfile    = attrs.get("file",       "").strip('"')
+            sig      = attrs.get("signature",  "").strip('"')
+            label_v  = attrs.get("label",      "").strip('"')
+            ls       = attrs.get("line_start", "").strip('"')
+            le       = attrs.get("line_end",   "").strip('"')
+
+            if ntype in ("file", "chapter"):
+                continue  # file-level nodes handled by tree
+
+            if nfile:
+                if nfile not in file_nodes:
+                    file_nodes[nfile] = []
+                file_nodes[nfile].append({
+                    "id":         nid,
+                    "type":       ntype,
+                    "label":      sig or label_v or nid.split("::")[-1],
+                    "line_start": int(ls) if ls else 0,
+                    "line_end":   int(le) if le else 0,
+                })
+
+        for edge in graph.get_edges():
+            lbl = edge.get_attributes().get("label", "").strip('"')
+            if lbl == "imports":
+                import_edges.append({
+                    "from":  edge.get_source().strip('"'),
+                    "to":    edge.get_destination().strip('"'),
+                    "label": lbl,
+                })
+
+    return jsonify({
+        "tree":         tree,
+        "file_nodes":   file_nodes,
+        "import_edges": import_edges,
+    })
+
+
+@app.route("/projects/<project_id>/graph/node_content/<path:node_id>")
+@login_required
+def graph_node_content(project_id: str, node_id: str):
+    """Return the source code for a specific node (function/class/file)."""
+    repo     = get_repo(project_id)
+    dot_path = str(repo.repo_path / ".residuality" / "graph.dot")
+    graph    = load_graph(dot_path)
+    if not graph:
+        return jsonify({"error": "Graph not found"}), 404
+
+    node = get_node_by_id(graph, node_id)
+
+    # If it's a file node, return full file
+    if not node:
+        try:
+            content = repo.read(node_id)
+            return jsonify({"content": content, "type": "file"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 404
+
+    # Return just the node's lines
+    try:
+        file_lines = repo.read(node["file"]).splitlines()
+        content    = "\n".join(
+            file_lines[node["line_start"] - 1 : node["line_end"]]
+        )
+        return jsonify({
+            "content":    content,
+            "type":       node["type"],
+            "file":       node["file"],
+            "line_start": node["line_start"],
+            "line_end":   node["line_end"],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/projects/<project_id>/graph/file_content/<path:filepath>")
+@login_required
+def graph_file_content(project_id: str, filepath: str):
+    """Return full source of a file."""
+    repo = get_repo(project_id)
+    try:
+        content = repo.read(filepath)
+        return jsonify({"content": content, "filepath": filepath})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.route("/projects/<project_id>/graph/explorer")
+@login_required
+def graph_explorer(project_id: str):
+    """Serve the React graph explorer page."""
+    repo = get_repo(project_id)
+    return render_template("graph_explorer.html", project_id=project_id)
+
+    
 # ── API endpoints ─────────────────────────────────────────────────────────
 
 @app.route("/api/projects")
@@ -988,3 +1079,56 @@ if __name__ == "__main__":
     port = int(os.getenv("RESIDUALITY_PORT", 5010))
     logger.info(f"Residuality starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+
+@app.route("/api/models")
+@login_required
+def api_models():
+    """Proxy OWUI model list."""
+    try:
+        r = requests.get(
+            f"{owui.base_url}/api/models",
+            headers=owui.headers,
+            timeout=10,
+        )
+        data = r.json()
+        models = [
+            {"id": m["id"], "name": m.get("name", m["id"])}
+            for m in data.get("data", [])
+            if not m.get("arena")  # skip arena model
+        ]
+        return jsonify({
+            "models":          models,
+            "current_chat":    owui.DEFAULT_MODEL,
+            "current_planner": owui.PLANNER_MODEL,
+            "current_summarizer": owui.SUMMARIZER_MODEL,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/models/select", methods=["POST"])
+@login_required  
+def api_models_select():
+    """Update active model selections — persisted to config file."""
+    import configparser
+    
+    chat_model      = request.form.get("chat_model",      "").strip()
+    planner_model   = request.form.get("planner_model",   "").strip()
+    summarizer_model = request.form.get("summarizer_model", "").strip()
+
+    # Write to a config file that persists across restarts
+    config_path = Path(REPOS_PATH).parent / "residuality_models.cfg"
+    cfg = configparser.ConfigParser()
+    cfg["models"] = {}
+    if chat_model:       cfg["models"]["chat"]       = chat_model
+    if planner_model:    cfg["models"]["planner"]     = planner_model
+    if summarizer_model: cfg["models"]["summarizer"]  = summarizer_model
+    with open(config_path, "w") as f:
+        cfg.write(f)
+
+    # Update in-memory client
+    if chat_model:       owui.DEFAULT_MODEL    = chat_model
+    if planner_model:    owui.PLANNER_MODEL    = planner_model
+    if summarizer_model: owui.SUMMARIZER_MODEL = summarizer_model
+
+    return jsonify({"status": "ok"})
