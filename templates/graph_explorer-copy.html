@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Graph Explorer — {{ project_id }} — Residuality{% endblock %}
+{% block head %}
+<style>
+.sr-only { position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap; }
+</style>
+{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+    <h1>Graph Explorer — {{ project_id }}</h1>
+    <a href="/projects/{{ project_id }}/graph" class="btn">&#8592; Project Control</a>
+</div>
+<div id="root" data-project-id="{{ project_id }}"></div>
+{% endblock %}
+{% block scripts %}
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel">{% raw %}
+const PROJECT_ID = document.getElementById('root').dataset.projectId;
+const { useState, useEffect, useCallback } = React;
+
+function Modal({ title, content, onClose }) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000}} onClick={onClose}>
+      <div style={{background:"var(--surface-2)",border:"0.5px solid var(--border)",borderRadius:12,width:"min(800px,90vw)",maxHeight:"80vh",display:"flex",flexDirection:"column",overflow:"hidden"}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",borderBottom:"0.5px solid var(--border)"}}>
+          <span style={{fontFamily:"monospace",fontSize:13,color:"var(--text-secondary)"}}>{title}</span>
+          <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",color:"var(--text-muted)",fontSize:20,lineHeight:1}}>x</button>
+        </div>
+        <pre style={{margin:0,padding:16,overflow:"auto",fontSize:12,fontFamily:"monospace",color:"var(--text-primary)",lineHeight:1.6,flex:1}}>{content}</pre>
+      </div>
+    </div>
+  );
+}
+
+function NodeCard({ node, onEye }) {
+  const colors = {
+    function: {bg:"#1a2035",border:"#388bfd",text:"#58a6ff"},
+    class:    {bg:"#1a2035",border:"#a371f7",text:"#c084fc"},
+    section:  {bg:"#2e2a1a",border:"#9e6a03",text:"#d29922"},
+    chapter:  {bg:"#1a2e1a",border:"#2ea043",text:"#3fb950"},
+    import:   {bg:"#21262d",border:"#6e7681",text:"#8b949e"},
+    main:     {bg:"#2e1a2e",border:"#a371f7",text:"#c084fc"},
+  };
+  const c = colors[node.type] || {bg:"#161b22",border:"#30363d",text:"#c9d1d9"};
+  return (
+    <div style={{background:c.bg,border:`1px solid ${c.border}`,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <span style={{fontSize:10,color:c.text,fontFamily:"monospace",opacity:0.7}}>{node.type}</span>
+        <span style={{fontSize:13,fontFamily:"monospace",color:"var(--text-primary)",flex:1}}>{node.label}</span>
+        {node.line_start > 0 && <span style={{fontSize:10,color:"var(--text-muted)",fontFamily:"monospace"}}>L{node.line_start}-{node.line_end}</span>}
+        <button onClick={()=>onEye(node)} style={{background:"none",border:"none",cursor:"pointer",color:"var(--text-muted)",padding:"2px 4px",fontSize:14}} title="View source">&#128065;</button>
+      </div>
+    </div>
+  );
+}
+
+function FilePanel({ item, fileNodes, importEdges, onEye, highlightedPaths }) {
+  const nodes = fileNodes[item.path] || [];
+  const imports = importEdges.filter(e => e.from === item.path);
+  return (
+    <div style={{padding:"0 4px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,paddingBottom:8,borderBottom:"0.5px solid var(--border)"}}>
+        <span style={{fontFamily:"monospace",fontSize:13,color:"var(--text-secondary)"}}>{item.name}</span>
+        <button onClick={()=>onEye({id:item.path,type:"file",label:item.name,line_start:0,line_end:0})} style={{background:"none",border:"none",cursor:"pointer",color:"var(--text-muted)",fontSize:16}} title="View full file">&#128065;</button>
+      </div>
+      {imports.length > 0 && (
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:11,color:"var(--text-muted)",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.05em"}}>imports</div>
+          {imports.map((e,i) => (
+            <div key={i} style={{fontSize:12,fontFamily:"monospace",padding:"2px 0",color:highlightedPaths.has(e.to)?"#f0883e":"var(--text-muted)",fontWeight:highlightedPaths.has(e.to)?600:400}}>{e.to}</div>
+          ))}
+        </div>
+      )}
+      {nodes.length > 0 && (
+        <div>
+          <div style={{fontSize:11,color:"var(--text-muted)",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.05em"}}>structure</div>
+          {nodes.map(n => <NodeCard key={n.id} node={n} onEye={onEye}/>)}
+        </div>
+      )}
+      {nodes.length === 0 && imports.length === 0 && (
+        <div style={{fontSize:13,color:"var(--text-muted)",textAlign:"center",padding:"20px 0"}}>No structure parsed</div>
+      )}
+    </div>
+  );
+}
+
+function DirItem({ item, onClick, isSelected, isHighlighted }) {
+  const isDir = item.type === "directory";
+  return (
+    <div onClick={()=>onClick(item)} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",borderRadius:8,cursor:"pointer",marginBottom:4,background:isSelected?"var(--bg-accent)":isHighlighted?"rgba(240,136,62,0.12)":"transparent",border:isSelected?"0.5px solid var(--border-accent)":isHighlighted?"0.5px solid #f0883e":"0.5px solid transparent"}}>
+      <span style={{fontSize:16}}>{isDir ? "&#128193;" : "&#128196;"}</span>
+      <span style={{fontSize:13,fontFamily:"monospace",flex:1,color:isSelected?"var(--text-accent)":"var(--text-primary)"}}>{item.name}</span>
+      {isDir && <span style={{fontSize:12,color:"var(--text-muted)"}}>&#8250;</span>}
+    </div>
+  );
+}
+
+function GraphExplorer() {
+  const [treeData, setTreeData]       = useState(null);
+  const [fileNodes, setFileNodes]     = useState({});
+  const [importEdges, setImportEdges] = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState(null);
+  const [stack, setStack]             = useState([]);
+  const [selected, setSelected]       = useState(null);
+  const [modal, setModal]             = useState(null);
+  const [loadingCode, setLoadingCode] = useState(false);
+
+  useEffect(() => {
+    fetch(`/projects/${PROJECT_ID}/graph/tree`)
+      .then(r => r.json())
+      .then(data => {
+        setTreeData(data.tree);
+        setFileNodes(data.file_nodes || {});
+        setImportEdges(data.import_edges || []);
+        setLoading(false);
+      })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  const currentDir = stack.length > 0 ? stack[stack.length-1] : treeData;
+  const currentChildren = currentDir?.children || [];
+  const highlightedPaths = new Set(selected ? importEdges.filter(e=>e.from===selected.path).map(e=>e.to) : []);
+
+  const handleItemClick = useCallback((item) => {
+    if (item.type === "directory") { setStack(s=>[...s,item]); setSelected(null); }
+    else { setSelected(item); }
+  }, []);
+
+  const handleBack = useCallback(() => { setStack(s=>s.slice(0,-1)); setSelected(null); }, []);
+
+  const handleEye = useCallback(async (node) => {
+    setLoadingCode(true);
+    try {
+      const isFile = node.type === "file" || node.line_start === 0;
+      const url = isFile
+        ? `/projects/${PROJECT_ID}/graph/file_content/${encodeURIComponent(node.id||node.path)}`
+        : `/projects/${PROJECT_ID}/graph/node_content/${encodeURIComponent(node.id)}`;
+      const title = isFile ? (node.label||node.name) : `${node.id} (L${node.line_start}-${node.line_end})`;
+      const r = await fetch(url);
+      const data = await r.json();
+      setModal({title, content: data.content || data.error || "(empty)"});
+    } catch(e) { setModal({title:"Error", content:e.message}); }
+    finally { setLoadingCode(false); }
+  }, []);
+
+  if (loading) return <div style={{padding:24,color:"var(--text-muted)",fontFamily:"monospace",fontSize:13}}>Loading graph...</div>;
+  if (error)   return <div style={{padding:24,color:"red",fontFamily:"monospace",fontSize:13}}>Error: {error}</div>;
+
+  const breadcrumbs = [treeData?.name||"root", ...stack.map(s=>s.name)];
+
+  return (
+    <div>
+      <h2 className="sr-only">Interactive directory graph explorer</h2>
+      {modal && <Modal title={modal.title} content={modal.content} onClose={()=>setModal(null)}/>}
+
+      <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:16,flexWrap:"wrap"}}>
+        {stack.length > 0 && (
+          <button onClick={handleBack} style={{background:"none",border:"0.5px solid var(--border-strong)",borderRadius:6,cursor:"pointer",color:"var(--text-secondary)",padding:"4px 10px",fontSize:12}}>
+            back
+          </button>
+        )}
+        {breadcrumbs.map((crumb,i) => (
+          <span key={i} style={{display:"flex",alignItems:"center",gap:4}}>
+            {i > 0 && <span style={{fontSize:11,color:"var(--text-muted)"}}>/</span>}
+            <span style={{fontSize:12,fontFamily:"monospace",color:i===breadcrumbs.length-1?"var(--text-primary)":"var(--text-muted)"}}>{crumb}</span>
+          </span>
+        ))}
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,minHeight:400}}>
+        <div style={{background:"var(--surface-1)",border:"0.5px solid var(--border)",borderRadius:12,padding:"12px 8px",overflow:"auto",maxHeight:600}}>
+          {currentChildren.length === 0
+            ? <div style={{padding:16,color:"var(--text-muted)",fontSize:13,textAlign:"center"}}>Empty</div>
+            : currentChildren.map((item,i) => (
+                <DirItem key={i} item={item} onClick={handleItemClick}
+                  isSelected={selected?.path===item.path}
+                  isHighlighted={highlightedPaths.has(item.path)||highlightedPaths.has(item.name)}/>
+              ))
+          }
+        </div>
+        <div style={{background:"var(--surface-1)",border:"0.5px solid var(--border)",borderRadius:12,padding:12,overflow:"auto",maxHeight:600}}>
+          {selected
+            ? <FilePanel item={selected} fileNodes={fileNodes} importEdges={importEdges} onEye={handleEye} highlightedPaths={highlightedPaths}/>
+            : <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",color:"var(--text-muted)",gap:8}}>
+                <span style={{fontSize:32}}>&#128269;</span>
+                <span style={{fontSize:13}}>Select a file to inspect</span>
+              </div>
+          }
+        </div>
+      </div>
+      {loadingCode && <div style={{marginTop:8,fontSize:12,color:"var(--text-muted)"}}>Loading source...</div>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<GraphExplorer/>);
+{% endraw %}</script>
+{% endblock %}
