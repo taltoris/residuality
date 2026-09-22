@@ -58,6 +58,7 @@ class ArtifactRepo:
                 "*.out\n"
                 "*.log\n"
                 "export/\n"
+                ".residuality/\n"
                 ".DS_Store\n"
             )
 
@@ -102,6 +103,7 @@ class ArtifactRepo:
                 "*.out\n"
                 "*.log\n"
                 "export/\n"
+                ".residuality/\n"
                 ".DS_Store\n"
             )
 
@@ -118,13 +120,19 @@ class ArtifactRepo:
             cw.set_value("user", "name",  GIT_USER_NAME)
             cw.set_value("user", "email", GIT_USER_EMAIL)
 
-        # Commit Residuality metadata (graph.dot, extract-python.scm, .gitignore)
-        # Only add files that aren't already tracked
+        # Commit Residuality metadata — .residuality is ignored by default
+        # (graph.dot, extract-python.scm), so only stage what git allows.
         files_to_add = []
         for f in [".residuality/extract-python.scm", ".residuality/graph.dot", ".gitignore"]:
             full = repo_path / f
-            if full.exists():
-                files_to_add.append(f)
+            if not full.exists():
+                continue
+            try:
+                repo.repo.git.check_ignore("--quiet", str(full))
+                continue
+            except Exception:
+                pass
+            files_to_add.append(f)
 
         if files_to_add:
             repo.index.add(files_to_add)
@@ -168,15 +176,6 @@ class ArtifactRepo:
         full_path.write_text(content, encoding="utf-8")
 
         self.repo.index.add([path])
-
-        # Also add graph.dot if it was updated
-        dot_rel = ".residuality/graph.dot"
-        dot_abs = self.repo_path / dot_rel
-        if dot_abs.exists():
-            try:
-                self.repo.index.add([dot_rel])
-            except Exception:
-                pass
 
         full_message = message
         if model_used:

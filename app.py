@@ -499,21 +499,26 @@ def build_graph_all(project_id: str):
             "# Residuality default .gitignore\n"
             "__pycache__/\n*.pyc\n*.pyo\n*.pyd\n"
             "build/\ndist/\n*.egg-info/\n.eggs/\n"
-            "*.so\n*.o\n*.a\n*.out\n*.log\nexport/\n.DS_Store\n"
+            "*.so\n*.o\n*.a\n*.out\n*.log\nexport/\n"
+            ".residuality/\n"
+            ".DS_Store\n"
         )
 
-    skip_dirs  = {'.git', '.residuality', '__pycache__', 'node_modules', 'export'}
-    skip_exts  = {'.pyc', '.pyo', '.pyd', '.so', '.o', '.a', '.out', '.log',
-                  '.bin', '.onnx', '.pkl', '.pt', '.pth', '.h5', '.model'}
     size_limit = 500 * 1024
 
-    for f in repo.repo_path.rglob("*"):
+    def _is_ignored(rel_path: str) -> bool:
+        """Ask git whether a path is ignored — respects the real .gitignore."""
+        try:
+            out = repo.repo.git.check_ignore("--quiet", rel_path)
+            return out.strip() != ""
+        except Exception:
+            return False
+
+    for f in sorted(repo.repo_path.rglob("*")):
         if f.is_dir():
             continue
-        rel_parts = f.parts[len(repo.repo_path.parts):]
-        if any(p in skip_dirs or p.startswith('.') for p in rel_parts):
-            continue
-        if f.suffix in skip_exts:
+        rel = str(f.relative_to(repo.repo_path))
+        if _is_ignored(rel):
             continue
         try:
             size = f.stat().st_size
@@ -523,7 +528,6 @@ def build_graph_all(project_id: str):
         if size > size_limit:
             continue
 
-        rel = str(f.relative_to(repo.repo_path))
         logger.info(f"Processing: {rel}")
         try:
             repo._update_graph(rel)
@@ -534,8 +538,7 @@ def build_graph_all(project_id: str):
             errors.append(error_msg)
 
     try:
-        repo.repo.git.add(".residuality/graph.dot")
-        if gitignore_path.exists():
+        if gitignore_path.exists() and not _is_ignored(".gitignore"):
             repo.repo.git.add(".gitignore")
         if repo.repo.is_dirty(index=True):
             repo.repo.index.commit(
@@ -666,11 +669,6 @@ def regenerate_and_commit(project_id: str):
             errors.append(f"graph {filepath}: {e}")
 
     try:
-        repo.repo.index.add([".residuality/graph.dot"])
-    except Exception as e:
-        errors.append(f"stage graph.dot: {e}")
-
-    try:
         commit = repo.repo.index.commit(message)
         index_commit_async(repo, commit.hexsha, project_id, "", message)
         return jsonify({"status": "ok", "hash": commit.hexsha[:8], "errors": errors})
@@ -725,12 +723,20 @@ def regenerate_graph(project_id: str):
     repo      = get_repo(project_id)
     errors    = []
     all_files = []
+
+    def _is_ignored(rel_path: str) -> bool:
+        try:
+            out = repo.repo.git.check_ignore("--quiet", rel_path)
+            return out.strip() != ""
+        except Exception:
+            return False
+
     for ext in ("*.py", "*.md"):
-        for f in repo.repo_path.rglob(ext):
-            parts = f.parts
-            if any(p.startswith('.') or p == 'export' for p in parts):
+        for f in sorted(repo.repo_path.rglob(ext)):
+            rel = str(f.relative_to(repo.repo_path))
+            if _is_ignored(rel):
                 continue
-            all_files.append(str(f.relative_to(repo.repo_path)))
+            all_files.append(rel)
 
     for filepath in all_files:
         try:
@@ -739,7 +745,6 @@ def regenerate_graph(project_id: str):
             errors.append(f"{filepath}: {e}")
 
     try:
-        repo.repo.git.add(".residuality/graph.dot")
         if repo.repo.is_dirty(index=True):
             repo.repo.index.commit("Regenerated graph.dot")
     except Exception as e:
