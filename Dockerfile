@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy only non-mounted files
 RUN mkdir -p /app/.residuality
-COPY .residuality/extract.scm /app/.residuality/extract.scm
+COPY .residuality/extract-python.scm /app/.residuality/extract-python.scm
 
 # Git global config
 RUN git config --global init.defaultBranch main \

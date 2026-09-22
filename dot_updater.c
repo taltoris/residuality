@@ -2,7 +2,7 @@
  * dot_updater.c
  * Residuality — surgical dot file updater
  *
- * Usage: tree-sitter query extract.scm <filepath> --json | dot_updater <graph.dot> <filepath>
+ * Usage: tree-sitter query extract-python.scm <filepath> --json | dot_updater <graph.dot> <filepath>
  *
  * Reads tree-sitter JSON from stdin.
  * Surgically replaces the section for <filepath> in <graph.dot>.

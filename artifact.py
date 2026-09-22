@@ -34,8 +34,8 @@ class ArtifactRepo:
         res_dir = self.repo_path / ".residuality"
         res_dir.mkdir(exist_ok=True)
 
-        src_scm = Path("/app/.residuality/extract.scm")
-        dst_scm = res_dir / "extract.scm"
+        src_scm = Path("/app/.residuality/extract-python.scm")
+        dst_scm = res_dir / "extract-python.scm"
         if src_scm.exists() and not dst_scm.exists():
             dst_scm.write_text(src_scm.read_text())
 
@@ -75,9 +75,9 @@ class ArtifactRepo:
         res_dir = repo_path / ".residuality"
         res_dir.mkdir(exist_ok=True)
 
-        # Copy extract.scm into the project
-        src_scm = Path("/app/.residuality/extract.scm")
-        dst_scm = res_dir / "extract.scm"
+        # Copy extract-python.scm into the project
+        src_scm = Path("/app/.residuality/extract-python.scm")
+        dst_scm = res_dir / "extract-python.scm"
         if src_scm.exists() and not dst_scm.exists():
             dst_scm.write_text(src_scm.read_text())
 
@@ -118,10 +118,10 @@ class ArtifactRepo:
             cw.set_value("user", "name",  GIT_USER_NAME)
             cw.set_value("user", "email", GIT_USER_EMAIL)
 
-        # Commit Residuality metadata (graph.dot, extract.scm, .gitignore)
+        # Commit Residuality metadata (graph.dot, extract-python.scm, .gitignore)
         # Only add files that aren't already tracked
         files_to_add = []
-        for f in [".residuality/extract.scm", ".residuality/graph.dot", ".gitignore"]:
+        for f in [".residuality/extract-python.scm", ".residuality/graph.dot", ".gitignore"]:
             full = repo_path / f
             if full.exists():
                 files_to_add.append(f)

@@ -57,7 +57,7 @@ store). Nothing leaves your machine.
 /app/context.py          # context compression for model calls
 /app/owui_client.py      # Open WebUI API client
 /app/dot_updater.c       # surgical graph.dot section replacer (C)
-/app/.residuality/extract.scm   # tree-sitter query for Python
+/app/.residuality/extract-python.scm   # tree-sitter query for Python
 /templates/*.html        # Jinja UI
 /static/residuality.js   # graph drill-down, gitignore, chat, file lists
 ```
@@ -118,7 +118,7 @@ and the default credentials are committed in `docker-compose.yml`.
 ## Usage
 
 1. **Create a project** — either a fresh repo or link an existing one (`/projects/new`).
-   Residuality writes `.residuality/extract.scm`, an empty `graph.dot`, and a default
+   Residuality writes `.residuality/extract-python.scm`, an empty `graph.dot`, and a default
    `.gitignore`, then commits them as `Init project: <id>`.
 2. **Build the graph** — ⚙ *Build Graph* runs tree-sitter over every `.py`/`.md`
    (skipping `.git`, `.residuality`, `export`, and files over 500 KB) and commits the
