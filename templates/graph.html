@@ -4,6 +4,29 @@
 <style>
 .svg-container { overflow:auto; background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:0.5rem; }
 .svg-container svg { max-width:100%; height:auto; }
+#node-modal { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:999;align-items:center;justify-content:center;padding:1rem; }
+#node-modal .shell { background:#161b22;border:0.5px solid #30363d;border-radius:12px;width:min(920px,96vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden; }
+#node-modal header { display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid #30363d; }
+#node-modal header .file { font-family:monospace;font-size:13px;color:#58a6ff; }
+#node-modal header button { background:none;border:none;cursor:pointer;font-size:13px;padding:3px 8px;border-radius:4px;color:#8b949e;font-family:inherit; }
+#node-modal header button:hover { background:#21262d;color:#c9d1d9; }
+#node-modal .body { display:flex;flex:1;overflow:hidden; }
+#node-modal .nodes { width:260px;overflow:auto;border-right:0.5px solid #30363d;padding:8px;flex-shrink:0; }
+#node-modal .source { flex:1;overflow:auto;padding:8px;background:#0d1117; }
+#node-modal .node-item { display:flex;flex-direction:column;gap:1px;padding:6px 8px;margin-bottom:3px;border-radius:6px;cursor:pointer;border:0.5px solid transparent; }
+#node-modal .node-item:hover { border-color:#30363d; }
+#node-modal .node-item.sel { background:#1a2035;border-color:#388bfd; }
+#node-modal .node-meta { display:flex;align-items:center;gap:6px; }
+#node-modal .badge { font-size:10px;padding:1px 5px;border-radius:3px;font-family:monospace;white-space:nowrap; }
+#node-modal .badge.function { background:#1a2035;color:#58a6ff; }
+#node-modal .badge.class    { background:#1a2035;color:#c084fc; }
+#node-modal .badge.section  { background:#2e2a1a;color:#d29922; }
+#node-modal .badge.chapter  { background:#1a2e1a;color:#3fb950; }
+#node-modal .badge.import   { background:#21262d;color:#8b949e; }
+#node-modal .badge.main     { background:#2e1a2e;color:#c084fc; }
+#node-modal .lines { font-size:10px;color:#8b949e;font-family:monospace; }
+#node-modal pre { margin:0;background:transparent;border:none;font-size:11px;line-height:1.5;color:#c9d1d9;white-space:pre; }
+#node-modal .empty { color:#8b949e;font-size:12px;padding:1rem;text-align:center; }
 .file-row { display:flex; align-items:center; gap:0.5rem; padding:0.3rem 0; border-bottom:1px solid #21262d; font-size:0.85rem; }
 .file-row:last-child { border-bottom:none; }
 .file-status { font-size:0.75rem; padding:0.1rem 0.4rem; border-radius:10px; min-width:2rem; text-align:center; }
@@ -75,6 +98,25 @@
 </div>
 
 <div class="svg-container">{{ svg | safe }}</div>
+<div id="node-modal">
+    <div class="shell">
+        <header>
+            <div>
+                <div class="file" id="modal-file"></div>
+                <span id="modal-node" style="font-size:11px;color:#8b949e;font-family:monospace;"></span>
+            </div>
+            <div style="display:flex;align-items:center;gap:4px;">
+                <button id="modal-expand" title="Show file detail graph">&#9881;</button>
+                <button id="modal-back" title="Back to node list" style="display:none;">&#8592; back</button>
+                <button id="modal-close" title="Close">&times;</button>
+            </div>
+        </header>
+        <div class="body">
+            <div class="nodes" id="modal-nodes"></div>
+            <div class="source" id="modal-source"><div class="empty">Select a node to view its source.</div></div>
+        </div>
+    </div>
+</div>
 <div id="plan-output"></div>
 <details style="margin-top:1rem;">
     <summary style="cursor:pointer;color:#8b949e;font-size:0.85rem;">Raw dot source</summary>
@@ -343,15 +385,139 @@
             .catch(function(e){ setStatus(status, 'Error: '+e, '#f85149'); });
     }
 
+    // graphviz turns a node's tooltip into a <title> element. For file nodes
+    // the tooltip reads "Click to expand <file>", so pull the trailing path
+    // out rather than matching the whole string.
+    function fileFromTooltip(t) {
+        var m = /([^\s]+(?:\.py|\.md))$/.exec(t.trim());
+        return m ? m[1] : null;
+    }
+
     function wireGraphClicks() {
         document.querySelectorAll('.svg-container a').forEach(function(a) {
             a.addEventListener('click', function(e) {
                 e.preventDefault();
                 var title = a.querySelector('title');
-                if (title) drillDown(title.textContent.trim());
+                if (!title) return;
+                var fp = fileFromTooltip(title.textContent);
+                if (fp) {
+                    openNodeModal(fp);
+                } else {
+                    drillDown(title.textContent.trim());
+                }
             });
         });
     }
+
+    // ── Node pop-up ────────────────────────────────────────────────────────
+    var NODE_PANE = 0, SOURCE_PANE = 1;
+    var modalState = { file: null, nodes: [], pane: NODE_PANE };
+    var modalNonce = 0;  // abort stale fetches
+
+    function nodeBadge(type) {
+        var c = type === 'function' ? 'function' :
+                type === 'class'    ? 'class'    :
+                type === 'section'  ? 'section'  :
+                type === 'chapter'  ? 'chapter'  :
+                type === 'import'   ? 'import'   :
+                type === 'main'     ? 'main'     : '';
+        return c ? '<span class="badge '+c+'">'+type+'</span>' : '';
+    }
+
+    function openNodeModal(filepath) {
+        document.getElementById('node-modal').style.display = 'flex';
+        document.getElementById('modal-back').style.display = 'none';
+        document.getElementById('modal-file').textContent = filepath;
+        document.getElementById('modal-node').textContent = '';
+        document.getElementById('modal-source').innerHTML = '<div class="empty">Loading...</div>';
+        modalState = { file: filepath, nodes: [], pane: NODE_PANE };
+        modalNonce++;
+        var n = modalNonce;
+        document.getElementById('modal-nodes').innerHTML =
+            '<div class="empty">Loading nodes...</div>';
+
+        fetch('/projects/'+PID+'/graph/nodes/'+encodeURIComponent(filepath))
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                if (n !== modalNonce) return;
+                if (data.error) {
+                    document.getElementById('modal-nodes').innerHTML =
+                        '<div class="empty">'+esc(data.error)+'</div>';
+                    return;
+                }
+                modalState.nodes = data.nodes;
+                renderNodesPane();
+            })
+            .catch(function(e) {
+                if (n !== modalNonce) return;
+                document.getElementById('modal-nodes').innerHTML =
+                    '<div class="empty">Error: '+esc(e.message)+'</div>';
+            });
+    }
+
+    function renderNodesPane() {
+        var div = document.getElementById('modal-nodes');
+        if (!modalState.nodes.length) {
+            div.innerHTML = '<div class="empty">No interior nodes parsed.</div>';
+            return;
+        }
+        div.innerHTML = modalState.nodes.map(function(n, i) {
+            var line = n.line_start > 0 ? ('<span class="lines">L'+n.line_start+'–'+n.line_end+'</span>') : '';
+            return '<div class="node-item" data-i="'+i+'">'+
+                '<div class="node-meta">'+nodeBadge(n.type)+'<span style="font-family:monospace;font-size:12px;">'+esc(n.label||n.signature||n.id)+'</span></div>'+
+                line+'</div>';
+        }).join('');
+        div.querySelectorAll('.node-item').forEach(function(el) {
+            el.addEventListener('click', function() {
+                selectNode(parseInt(this.dataset.i));
+            });
+        });
+    }
+
+    function selectNode(i) {
+        var n = modalState.nodes[i];
+        if (!n) return;
+        var div = document.getElementById('modal-nodes');
+        div.querySelectorAll('.node-item').forEach(function(el, idx) {
+            el.classList.toggle('sel', idx === i);
+        });
+        document.getElementById('modal-node').textContent = n.id;
+        document.getElementById('modal-back').style.display = 'inline-block';
+        modalState.pane = SOURCE_PANE;
+        document.getElementById('modal-source').innerHTML = '<div class="empty">Loading source...</div>';
+        fetch('/projects/'+PID+'/graph/node_content/'+encodeURIComponent(n.id))
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                var pre = document.createElement('pre');
+                pre.textContent = data.content || data.error || '(empty)';
+                document.getElementById('modal-source').innerHTML = '';
+                document.getElementById('modal-source').appendChild(pre);
+            })
+            .catch(function(e) {
+                document.getElementById('modal-source').innerHTML =
+                    '<div class="empty">Error: '+esc(e.message)+'</div>';
+            });
+    }
+
+    function closeNodeModal() {
+        document.getElementById('node-modal').style.display = 'none';
+        modalState = { file: null, nodes: [], pane: NODE_PANE };
+    }
+
+    document.getElementById('modal-close').addEventListener('click', closeNodeModal);
+    document.getElementById('modal-back').addEventListener('click', function() {
+        modalState.pane = NODE_PANE;
+        document.getElementById('modal-back').style.display = 'none';
+        document.getElementById('modal-node').textContent = '';
+        document.getElementById('modal-source').innerHTML = '<div class="empty">Select a node to view its source.</div>';
+    });
+    document.getElementById('modal-expand').addEventListener('click', function() {
+        closeNodeModal();
+        drillDown(modalState.file);
+    });
+    document.getElementById('node-modal').addEventListener('click', function(e) {
+        if (e.target === this) closeNodeModal();
+    });
 
     document.getElementById('toggle-external-btn').addEventListener('click', function() {
         _showExternal = !_showExternal;

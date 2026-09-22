@@ -1033,6 +1033,38 @@ def graph_node_content(project_id: str, node_id: str):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/projects/<project_id>/graph/nodes/<path:filepath>")
+@login_required
+def graph_file_nodes(project_id: str, filepath: str):
+    """Return the interior nodes (functions/classes/sections) of a file."""
+    repo     = get_repo(project_id)
+    dot_path = str(repo.repo_path / ".residuality" / "graph.dot")
+    graph    = load_graph(dot_path)
+    if not graph:
+        return jsonify({"error": "Graph not found"}), 404
+
+    nodes = []
+    for node in graph.get_nodes():
+        attrs = node.get_attributes()
+        nid   = node.get_name().strip('"')
+        nfile = attrs.get("file", "").strip('"')
+        if nfile != filepath or nid == filepath:
+            continue
+        def _i(key):
+            try:    return int(attrs.get(key, ""))
+            except: return 0
+        nodes.append({
+            "id":         nid,
+            "type":       attrs.get("type", "").strip('"'),
+            "signature":  attrs.get("signature", "").strip('"'),
+            "label":      attrs.get("label", "").strip('"'),
+            "line_start": _i("line_start"),
+            "line_end":   _i("line_end"),
+        })
+    # Preserve parse order
+    return jsonify({"file": filepath, "nodes": nodes})
+
+
 @app.route("/projects/<project_id>/graph/file_content/<path:filepath>")
 @login_required
 def graph_file_content(project_id: str, filepath: str):

@@ -91,12 +91,6 @@ def get_neighbors(graph: pydot.Dot, node_id: str) -> dict:
 # ── Level 1: File dependency graph ────────────────────────────────────────
 
 def render_file_graph(dot_path: str, show_external: bool = False) -> str:
-    """
-    Render a clean file-level dependency graph.
-    Internal project files always shown.
-    External pip packages collapsed by default, expandable.
-    Edge labels show the imported name, not "imports".
-    """
     graph = load_graph(dot_path)
     if not graph:
         return "<p style='color:#f85149'>No graph.dot found — click ⚙ Build Graph first.</p>"
