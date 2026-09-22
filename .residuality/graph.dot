@@ -307,8 +307,10 @@ digraph residuality {
     // --- end: artifact.py ---
 
     // --- file: README.md ---
-    "README.md" [type="chapter", line_start=1, line_end=3, label="README.md"];
+    "README.md" [type="chapter", line_start=1, line_end=188, label="README.md"];
+    "README.md::s3" [type="section", file="README.md", line_start=144, line_end=146, label="The cellar door", word_count=13];
 
+    "README.md" -> "README.md::s3" [label="contains"];
     // --- end: README.md ---
 
 }
