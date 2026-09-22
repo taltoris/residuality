@@ -185,4 +185,4 @@ The door had never been locked. That was the part she couldn't forgive.
 
 ## License
 
-MIT — see `LICENSE`.
+Apache 2.0 — see `LICENSE`.
