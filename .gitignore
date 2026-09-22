@@ -10,6 +10,6 @@ dist/
 *.out
 *.log
 export/
-.DS_Store
+.residuality/
 .env
-.*
+.DS_Store
