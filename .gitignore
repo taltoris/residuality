@@ -10,8 +10,6 @@ dist/
 *.out
 *.log
 export/
-repos/
-repos/*
 .DS_Store
 .env
 .*
