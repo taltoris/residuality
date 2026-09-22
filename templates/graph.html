@@ -385,26 +385,56 @@
             .catch(function(e){ setStatus(status, 'Error: '+e, '#f85149'); });
     }
 
-    // graphviz turns a node's tooltip into a <title> element. For file nodes
-    // the tooltip reads "Click to expand <file>", so pull the trailing path
-    // out rather than matching the whole string.
-    function fileFromTooltip(t) {
-        var m = /([^\s]+(?:\.py|\.md))$/.exec(t.trim());
-        return m ? m[1] : null;
+    // graphviz nests the anchor INSIDE the node group, so the node name lives
+    // on the surrounding <g class="node">, never on the <a> itself:
+    //
+    //   <g id="node3" class="node">
+    //     <title>artifact.py</title>          <-- node name / full node id
+    //     <g id="a_node3">
+    //       <a xlink:href="..." xlink:title="Click to expand artifact.py">
+    //         <polygon .../><text ...>artifact.py</text>
+    //       </a></g></g>
+    //
+    // a.querySelector('title') is therefore always null — walk up to the
+    // owning node group instead. (This was why node clicks did nothing.)
+    function owningNodeGroup(el) {
+        for (var p = el; p; p = p.parentNode) {
+            if (p.nodeType === 1 && p.classList && p.classList.contains('node')) return p;
+        }
+        return null;
+    }
+
+    function nodeTitle(a) {
+        var g = owningNodeGroup(a);
+        var t = a.querySelector('title') || (g && g.querySelector('title'));
+        if (t && t.textContent.trim()) return t.textContent.trim();
+        var x = a.getAttribute('xlink:title') || a.getAttribute('title');
+        return x ? x.replace(/^Click to expand\s+/, '').trim() : '';
+    }
+
+    // 'artifact.py'              -> file node  -> open its node list
+    // 'artifact.py::ArtifactRepo' -> interior   -> open node list, jump to it
+    // 'Click to expand x.py'     -> file node  -> (tooltip-only fallback)
+    function refFromTitle(t) {
+        t = (t || '').replace(/^Click to expand\s+/, '').trim();
+        if (!t) return null;
+        if (t.indexOf('->') >= 0) return null;   // edge title, e.g. app.py->artifact.py
+        if (t.indexOf('::') >= 0) {
+            return { file: t.split('::')[0], nodeId: t };
+        }
+        if (/\.(py|md|js|ts|c|h|cpp|rs|go|txt|rst)$/.test(t)) {
+            return { file: t, nodeId: null };
+        }
+        return null;
     }
 
     function wireGraphClicks() {
         document.querySelectorAll('.svg-container a').forEach(function(a) {
             a.addEventListener('click', function(e) {
                 e.preventDefault();
-                var title = a.querySelector('title');
-                if (!title) return;
-                var fp = fileFromTooltip(title.textContent);
-                if (fp) {
-                    openNodeModal(fp);
-                } else {
-                    drillDown(title.textContent.trim());
-                }
+                var ref = refFromTitle(nodeTitle(a));
+                if (!ref) return;
+                openNodeModal(ref.file, ref.nodeId);
             });
         });
     }
@@ -424,7 +454,7 @@
         return c ? '<span class="badge '+c+'">'+type+'</span>' : '';
     }
 
-    function openNodeModal(filepath) {
+    function openNodeModal(filepath, preselectNodeId) {
         document.getElementById('node-modal').style.display = 'flex';
         document.getElementById('modal-back').style.display = 'none';
         document.getElementById('modal-file').textContent = filepath;
@@ -447,6 +477,14 @@
                 }
                 modalState.nodes = data.nodes;
                 renderNodesPane();
+                // Clicking an interior node in the detail graph jumps
+                // straight to that node's source.
+                if (preselectNodeId) {
+                    var idx = modalState.nodes.findIndex(function(x) {
+                        return x.id === preselectNodeId;
+                    });
+                    if (idx >= 0) selectNode(idx);
+                }
             })
             .catch(function(e) {
                 if (n !== modalNonce) return;
@@ -462,9 +500,13 @@
             return;
         }
         div.innerHTML = modalState.nodes.map(function(n, i) {
-            var line = n.line_start > 0 ? ('<span class="lines">L'+n.line_start+'–'+n.line_end+'</span>') : '';
-            return '<div class="node-item" data-i="'+i+'">'+
-                '<div class="node-meta">'+nodeBadge(n.type)+'<span style="font-family:monospace;font-size:12px;">'+esc(n.label||n.signature||n.id)+'</span></div>'+
+            var line  = n.line_start > 0 ? ('<span class="lines">L'+n.line_start+'–'+n.line_end+'</span>') : '';
+            // 'file::Class::method' -> indent methods one level under the class
+            var depth = Math.max(0, n.id.split('::').length - 2);
+            var pad   = depth ? ' style="padding-left:'+(8 + depth*14)+'px;"' : '';
+            var text  = n.signature || n.label || n.id.split('::').slice(-1)[0];
+            return '<div class="node-item" data-i="'+i+'"'+pad+'>'+
+                '<div class="node-meta">'+nodeBadge(n.type)+'<span style="font-family:monospace;font-size:12px;">'+esc(text)+'</span></div>'+
                 line+'</div>';
         }).join('');
         div.querySelectorAll('.node-item').forEach(function(el) {
@@ -512,8 +554,9 @@
         document.getElementById('modal-source').innerHTML = '<div class="empty">Select a node to view its source.</div>';
     });
     document.getElementById('modal-expand').addEventListener('click', function() {
+        var f = modalState.file;   // closeNodeModal() clears modalState
         closeNodeModal();
-        drillDown(modalState.file);
+        if (f) drillDown(f);
     });
     document.getElementById('node-modal').addEventListener('click', function(e) {
         if (e.target === this) closeNodeModal();
@@ -540,6 +583,10 @@
         document.getElementById('toggle-external-btn').style.display = 'inline-block';
         location.reload();
     });
+
+    // This page owns SVG click handling — keep residuality.js from layering
+    // its own (legacy) handlers on top and double-firing.
+    window.__graphClicksOwned = true;
 
     // Wire clicks on initial SVG
     wireGraphClicks();

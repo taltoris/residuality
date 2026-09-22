@@ -14,4 +14,4 @@ repos/
 repos/*
 .DS_Store
 .env
-.env
+.*

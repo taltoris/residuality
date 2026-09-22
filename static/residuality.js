@@ -364,7 +364,10 @@ function drillDown(projectId, filepath) {
         .catch(function(e) { setStatus(status, 'Error: ' + e, '#f85149'); });
 }
 
-// Wire clicks on initial page load
+// Wire clicks on initial page load — unless the page owns SVG clicks itself
+// (graph.html sets window.__graphClicksOwned, since its handler is aware of
+// graphviz's <g class="node"><title> structure).
 document.addEventListener('DOMContentLoaded', function() {
+    if (window.__graphClicksOwned) return;
     wireGraphClicks();
 });

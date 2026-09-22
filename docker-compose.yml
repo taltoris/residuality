@@ -6,7 +6,8 @@ services:
     ports:
       - "${RESIDUALITY_PORT:-5010}:5010"
     volumes:
-      - ./repos:${REPOS_PATH:-/repos}
+      - ~/sandbox/repos:/repos
+      - ./:/repos/residuality
       - ./templates:/app/templates
       - ./static:/app/static
       - ./app.py:/app/app.py
