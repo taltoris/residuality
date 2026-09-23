@@ -36,14 +36,9 @@ store). Nothing leaves your machine.
                                  │  owui_client.py      │
   ┌─────────────────────┐        │  graph.py   pydot    │
   │ Embed svc   :8090   │◄───────┘                      │
-  │ (nomic-embed-text)  │         └──────────┬──────────┘
-  └─────────────────────┘                    │
-                                      tree-sitter JSON
-                                            │
-                                            ▼
-                                 ┌─────────────────────┐
-                                 │  dot_updater  (C)   │  ← rewrites graph.dot
-                                 └─────────────────────┘
+  │ (nomic-embed-text)  │         └────────────────────┘
+  └─────────────────────┘                    
+
 ```
 
 ### Layout
