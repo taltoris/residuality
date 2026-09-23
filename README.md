@@ -51,7 +51,6 @@ store). Nothing leaves your machine.
 /app/snapshot.py         # episodic snapshot generation + storage
 /app/context.py          # context compression for model calls
 /app/owui_client.py      # Open WebUI API client
-/app/dot_updater.c       # surgical graph.dot section replacer (C)
 /app/.residuality/extract-python.scm   # tree-sitter query for Python
 /templates/*.html        # Jinja UI
 /static/residuality.js   # graph drill-down, gitignore, chat, file lists
@@ -85,8 +84,6 @@ r._update_graph('src/main.py')
 
 ```bash
 pip install -r requirements.txt
-gcc -O2 -o dot_updater dot_updater.c cJSON.c -lm
-sudo mv dot_updater /usr/local/bin/dot_updater
 RESIDUALITY_PORT=5010 python app.py
 ```
 
@@ -164,11 +161,6 @@ The door had never been locked. That was the part she couldn't forgive.
 
 ### Known limitations
 
-- There are **two graph-update implementations** that diverge: `artifact.py` walks the
-  tree-sitter AST directly, while `dot_updater.c` consumes `tree-sitter query` JSON.
-  Only one should own parsing. Both stop at function bodies, so nested functions are
-  invisible, and the C path's class-parent heuristic (`start_row <= current_class_end`)
-  mis-attributes methods across nested classes and bare functions.
 - `chat_send` reads the **working tree** (`repo.read(path)`) rather than the commit a
   node belongs to, so content can be stale when browsing history.
 - `merge` recomputes `repo.diff(a, b)` once **per file** instead of once per merge.
