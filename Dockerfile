@@ -20,10 +20,6 @@ RUN gcc -O2 -o dot_updater dot_updater.c cJSON.c -lm \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy only non-mounted files
-RUN mkdir -p /app/.residuality
-COPY .residuality/extract-python.scm /app/.residuality/extract-python.scm
-
 # Git global config
 RUN git config --global init.defaultBranch main \
     && git config --global safe.directory '*'

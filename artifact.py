@@ -6,6 +6,7 @@ Handles init, read, write, branch, merge, checkout, diff, and optional remotes.
 
 import os
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 import git
@@ -16,6 +17,142 @@ REPOS_PATH = os.getenv("REPOS_PATH", "/repos")
 GIT_USER_NAME  = os.getenv("GIT_USER_NAME",  "Residuality")
 GIT_USER_EMAIL = os.getenv("GIT_USER_EMAIL", "residuality@local")
 GITHUB_TOKEN   = os.getenv("GITHUB_TOKEN", "")
+
+
+# ── Language rules table ──────────────────────────────────────────────────
+
+# Per-language tree-sitter rules used by `_update_code_graph`.
+#   containers  node types that own a body (class, struct, impl, module...) —
+#               name_field is the child field holding the name, body_field is
+#               the child field holding the body, node_type is the graph node
+#               type.
+#   functions   node types that are callable definitions — name_field as
+#               above, unwrap walks one (or a chain of) nested fields to reach
+#               the name node.
+#   imports     {"type": node type, "field": a single child field, or
+#               "collect": set of descendant types}. Delimiters the parser
+#               keeps on raw module text (`<stdio.h>`, `"x.h"`, `'os'`) are
+#               stripped by `_strip_delimiters`.
+#
+# Adding a language: add the entry here, add the tree-sitter-* binding to
+# requirements.txt and the extension to _EXTENSION_TO_LANG.
+
+_EXTENSION_TO_LANG = {
+    ".py":    "python",
+    ".pyi":   "python",
+    ".c":     "c",
+    ".h":     "c",
+    ".cpp":   "cpp",
+    ".hpp":   "cpp",
+    ".cc":    "cpp",
+    ".cxx":   "cpp",
+    ".c++":   "cpp",
+    ".h++":   "cpp",
+    ".js":    "javascript",
+    ".mjs":   "javascript",
+    ".cjs":   "javascript",
+    ".jsx":   "javascript",
+    ".ts":    "javascript",
+    ".tsx":   "javascript",
+    ".rs":    "rust",
+}
+
+_LANGUAGE_RULES = {
+    "python": {
+        "module":     "tree_sitter_python",
+        "containers": {
+            "class_definition": {"name_field": "name", "body_field": "body"},
+        },
+        "functions": {
+            "function_definition": {"name_field": "name"},
+            "decorated_definition": {"name_field": "name",
+                                     "unwrap": "definition"},
+        },
+        "imports": [
+            {"type": "import_statement", "field": "name",
+             "postprocess": "strip_as"},
+            {"type": "import_from_statement", "field": "module_name"},
+        ],
+    },
+    "c": {
+        "module":     "tree_sitter_c",
+        "containers": {},                     # C has no classes
+        "functions": {
+            "function_definition": {"name_field": "declarator",
+                                    "unwrap": ["declarator", "declarator"],
+                                    "name_is_self": True},
+        },
+        "imports": [
+            {"type": "preproc_include", "field": "path"},
+        ],
+    },
+    "cpp": {
+        "module":     "tree_sitter_cpp",
+        "containers": {
+            "struct_specifier":   {"name_field": "name", "body_field": "body"},
+            "class_specifier":    {"name_field": "name", "body_field": "body"},
+            "enum_specifier":     {"name_field": "name", "body_field": "body"},
+        },
+        "functions": {
+            "function_definition": {"name_field": "name",
+                                    "unwrap": ["declarator", "declarator"],
+                                    "name_is_self": True},
+        },
+        "imports": [
+            {"type": "preproc_include", "field": "path"},
+        ],
+    },
+    "javascript": {
+        "module":     "tree_sitter_javascript",
+        "containers": {
+            "class_declaration": {"name_field": "name", "body_field": "body"},
+        },
+        "functions": {
+            "method_definition":    {"name_field": "name"},
+            "constructor":          {"name_field": "name"},
+            "function_declaration": {"name_field": "name"},
+            # arrow functions are skipped — their name lives on the
+            # variable_declarator, not the arrow function node.
+        },
+        "imports": [
+            {"type": "import_statement", "field": "source"},
+        ],
+    },
+    "rust": {
+        "module":     "tree_sitter_rust",
+        "containers": {
+            "struct_item": {"name_field": "name", "body_field": "body"},
+            "enum_item":   {"name_field": "name", "body_field": "body"},
+            "mod_item":    {"name_field": "name", "body_field": "body",
+                            "node_type": "module"},
+            "impl_item":   {"name_field": "type", "body_field": "body",
+                            "node_type": "class", "container_skip": True},
+            "trait_item":  {"name_field": "name", "body_field": "body"},
+        },
+        "functions": {
+            "function_item": {"name_field": "name"},
+        },
+        "imports": [
+            {"type": "use_declaration", "field": "argument",
+             "postprocess": "strip_as"},
+        ],
+    },
+}
+
+
+def _strip_delimiters(text: str) -> str:
+    """Drop parser-delimiters tree-sitter retains on raw module text.
+
+    C/C++ `system_lib_string` -> <stdio.h>      -> stdio.h
+    C/C++ `string_literal`    -> "x.h"          -> x.h
+    JS      `string`          -> 'os'           -> os
+    Python  `dotted_name`     -> os.path        -> os.path (unchanged)
+    """
+    # compare matching delimiter pairs; built with chr() so the
+    pairs = [(chr(60), chr(62)), (chr(39), chr(39)), (chr(34), chr(34))]
+    if len(text) >= 2 and (text[0], text[-1]) in pairs:
+        return text[1:-1]
+    return text
 
 
 class ArtifactRepo:
@@ -320,21 +457,39 @@ class ArtifactRepo:
         if not full_path.exists():
             return
 
-        if filepath.endswith(".py"):
-            self._update_python_graph(filepath, dot_path)
+        lang = self._lang_key(filepath)
+        if lang:
+            self._update_code_graph(filepath, _LANGUAGE_RULES[lang], dot_path)
         elif filepath.endswith(".md"):
             self._update_prose_graph(filepath)
 
-    def _update_python_graph(self, filepath: str, dot_path: Path) -> None:
-        """Parse a Python file using tree-sitter Python bindings."""
-        import tree_sitter_python as tspython
+    @staticmethod
+    def _lang_key(filepath: str) -> Optional[str]:
+        """Map a file extension onto the language rules table key."""
+        name = Path(filepath).name.lower()
+        for ext, lang in _EXTENSION_TO_LANG.items():
+            if name.endswith(ext):
+                return lang
+        return None
+
+    def _update_code_graph(self, filepath: str, rules: dict,
+                           dot_path: Path) -> None:
+        """Parse a code file with its tree-sitter grammar and update graph.dot.
+
+        One walker, one dot writer for every language. The per-language rules
+        table declares which node types are classes, functions and imports, so
+        adding a language is a table entry plus a tree-sitter-* binding.
+        """
+        import importlib
+
         from tree_sitter import Language, Parser
 
         full_path = self.repo_path / filepath
         source    = full_path.read_bytes()
 
-        PY_LANGUAGE = Language(tspython.language())
-        parser      = Parser(PY_LANGUAGE)
+        lang_module = importlib.import_module(rules["module"])
+        language    = Language(lang_module.language())
+        parser      = Parser(language)
         tree        = parser.parse(source)
 
         nodes = []
@@ -351,68 +506,121 @@ class ArtifactRepo:
         def node_text(n) -> str:
             return source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
 
-        # Walk the tree directly — avoids query API version differences
-        def walk(node, parent_class_id=None, parent_class_end=0):
-            if node.type == "import_from_statement":
-                mod_node = node.child_by_field_name("module_name")
-                if mod_node:
-                    mod = node_text(mod_node)
-                    edges.append(f'    "{filepath}" -> "{mod}" [label="imports"];')
+        def collect_nodes(node, types, out):
+            """Gather every descendant of `node` whose type is in `types`."""
+            if node.type in types:
+                out.append(node)
+            for child in node.children:
+                collect_nodes(child, types, out)
 
-            elif node.type == "import_statement":
-                for child in node.children:
-                    if child.type in ("dotted_name", "aliased_import"):
-                        mod = node_text(child).split(" as ")[0].strip()
-                        edges.append(f'    "{filepath}" -> "{mod}" [label="imports"];')
-
-            elif node.type == "class_definition":
-                name_node = node.child_by_field_name("name")
-                if name_node:
-                    class_name = node_text(name_node)
-                    class_id   = f"{filepath}::{class_name}"
-                    sig        = escape(f"class {class_name}")
-                    nodes.append(
-                        f'    "{class_id}" [type="class", file="{filepath}", '
-                        f'line_start={node.start_point[0]+1}, '
-                        f'line_end={node.end_point[0]+1}, '
-                        f'signature="{sig}"];'
-                    )
-                    edges.append(f'    "{filepath}" -> "{class_id}" [label="contains"];')
-                    # Recurse into class body with class context
-                    body = node.child_by_field_name("body")
+        # Walk the tree directly — avoids query API version differences.
+        # `class_id`/`class_end` track the innermost enclosing class so methods
+        # become "file.py::Class::method" instead of "file.py::method". Both are
+        # byte offsets — the old row-vs-byte mix mis-attributed methods across
+        # nested classes (see README known limitations).
+        def walk(node, parent_id, class_id=None, class_end=0):
+            # --- class / struct / enum / impl / module container -----------
+            for ctype, cspec in rules["containers"].items():
+                if node.type != ctype:
+                    continue
+                name_node = node.child_by_field_name(cspec["name_field"])
+                if not name_node:
+                    break
+                class_name = node_text(name_node)
+                class_type = cspec.get("node_type", "class")
+                class_node_id = f"{filepath}::{class_name}"
+                if cspec.get("container_skip"):
+                    # scopes its body (e.g. Rust `impl Point`) but shares
+                    # the ID with the real definition, so emit no node
+                    body_field = cspec.get("body_field")
+                    if body_field:
+                        body = node.child_by_field_name(body_field)
+                        if body:
+                            for child in body.children:
+                                walk(child, parent_id=class_node_id,
+                                     class_id=class_node_id,
+                                     class_end=node.end_byte)
+                    return
+                sig = escape(f"{class_type} {class_name}")
+                nodes.append(
+                    f'    "{class_node_id}" [type="{class_type}", '
+                    f'file="{filepath}", line_start={node.start_point[0]+1}, '
+                    f'line_end={node.end_point[0]+1}, signature="{sig}"];'
+                )
+                edges.append(f'    "{filepath}" -> "{class_node_id}" '
+                             f'[label="contains"];')
+                body_field = cspec.get("body_field")
+                if body_field:
+                    body = node.child_by_field_name(body_field)
                     if body:
                         for child in body.children:
-                            walk(child, parent_class_id=class_id,
-                                 parent_class_end=node.end_byte)
-                    return  # already walked body
+                            walk(child, parent_id=class_node_id,
+                                 class_id=class_node_id, class_end=node.end_byte)
+                return  # body already walked
 
-            elif node.type in ("function_definition", "decorated_definition"):
+            # --- function / method ---------------------------------------
+            for ftype, fspec in rules["functions"].items():
+                if node.type != ftype:
+                    continue
                 fn_node = node
-                if node.type == "decorated_definition":
-                    fn_node = node.child_by_field_name("definition") or node
-                name_node = fn_node.child_by_field_name("name")
-                if name_node:
-                    fn_name   = node_text(name_node)
-                    parent_id = parent_class_id if parent_class_id else filepath
-                    func_id   = f"{parent_id}::{fn_name}"
-                    sig       = escape(fn_name + "(...)")
-                    nodes.append(
-                        f'    "{func_id}" [type="function", file="{filepath}", '
-                        f'line_start={fn_node.start_point[0]+1}, '
-                        f'line_end={fn_node.end_point[0]+1}, '
-                        f'signature="{sig}"];'
-                    )
-                    edges.append(f'    "{parent_id}" -> "{func_id}" [label="contains"];')
+                unwrap = fspec.get("unwrap")
+                if unwrap:
+                    if isinstance(unwrap, list):
+                        for field in unwrap:
+                            fn_node = fn_node.child_by_field_name(field) or fn_node
+                    else:
+                        fn_node = fn_node.child_by_field_name(unwrap) or fn_node
+                if fspec.get("name_is_self"):
+                    name_node = fn_node
+                else:
+                    name_node = fn_node.child_by_field_name(
+                        fspec["name_field"])
+                if not name_node:
+                    break
+                fn_name  = node_text(name_node)
+                fn_parent = class_id if class_id else parent_id
+                fn_id    = f"{fn_parent}::{fn_name}"
+                sig      = escape(fn_name + "(...)")
+                nodes.append(
+                    f'    "{fn_id}" [type="function", file="{filepath}", '
+                    f'line_start={fn_node.start_point[0]+1}, '
+                    f'line_end={fn_node.end_point[0]+1}, signature="{sig}"];'
+                )
+                edges.append(f'    "{fn_parent}" -> "{fn_id}" '
+                             f'[label="contains"];')
                 return  # don't recurse into function bodies
 
-            # Recurse for all other node types
+            # --- import edges --------------------------------------------
+            for imp in rules["imports"]:
+                if node.type != imp["type"]:
+                    continue
+                field = imp.get("field")
+                if field:
+                    mod_node = node.child_by_field_name(field)
+                    if mod_node:
+                        mod = _strip_delimiters(node_text(mod_node))
+                        if imp.get("postprocess") == "strip_as":
+                            mod = mod.split(" as ")[0].strip()
+                        edges.append(f'    "{filepath}" -> "{mod}" '
+                                     f'[label="imports"];')
+                collect = imp.get("collect")
+                if collect:
+                    mods = []
+                    collect_nodes(node, set(collect), mods)
+                    for mod_node in mods:
+                        mod = _strip_delimiters(node_text(mod_node))
+                        if mod:
+                            edges.append(f'    "{filepath}" -> "{mod}" '
+                                         f'[label="imports"];')
+                break
+
+            # --- recurse for all other node types ------------------------
             for child in node.children:
-                walk(child, parent_class_id, parent_class_end)
+                walk(child, parent_id, class_id, class_end)
 
-        walk(tree.root_node)
-
+        walk(tree.root_node, parent_id=filepath)
         self._write_dot_section(filepath, nodes, edges, dot_path)
-        logger.info(f"graph: {filepath} → {len(nodes)} nodes, {len(edges)} edges")
+        logger.info(f"graph: {filepath} -> {len(nodes)} nodes, {len(edges)} edges")
 
     def _write_dot_section(self, filepath: str, nodes: list,
                            edges: list, dot_path: Path) -> None:
