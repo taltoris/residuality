@@ -2,8 +2,33 @@
 {% block title %}Project Control — {{ project_id }} — Residuality{% endblock %}
 {% block head %}
 <style>
-.svg-container { overflow:auto; background:#0d1117; border:1px solid #30363d; border-radius:8px; padding:0.5rem; }
-.svg-container svg { max-width:100%; height:auto; }
+/* The canvas is one scroll container holding a horizontal strip of directory
+   panels. Panels keep their natural width, so navigating never squashes the
+   graph; the strip scrolls instead. Drilling appends a panel to the right and
+   slides the strip left just far enough that the new panel's right edge --
+   the column of sub-folders -- lands on the right of the workspace. */
+.svg-container { position:relative; overflow-x:auto; overflow-y:hidden; background:#0d1117; border:1px solid #30363d; border-radius:8px; }
+.graph-strip { display:flex; align-items:flex-start; }
+/* Leading slack. Where the strip is narrower than the pane it is this spacer,
+   not a margin, that pushes it right -- so the sub-folder column, and with it
+   the whole directory, sits on the right edge of the workspace instead of
+   floating in the middle. A spacer rather than padding because a percentage
+   width inside the strip (the fitted single-file view) has to resolve against
+   the full pane. It collapses to 0 by itself the moment the strip grows past
+   the pane and scrolling takes over. */
+.graph-lead { flex:0 0 auto; width:0; transition:width .22s ease; }
+.graph-panel { flex:0 0 auto; padding:0.5rem; }
+.graph-panel svg { max-width:none; height:auto; display:block; }
+.graph-panel svg a { cursor:pointer; }
+/* Single-file detail: one panel, scaled down to fit the pane. */
+.graph-panel.fit { max-width:100%; }
+.graph-panel.fit svg { max-width:100%; }
+.crumb { display:flex; align-items:center; flex-wrap:wrap; gap:.1rem; padding:.4rem .55rem; margin-bottom:.6rem; background:#0d1117; border:1px solid #30363d; border-radius:8px; font-family:'Courier New',monospace; font-size:.85rem; }
+.crumb-item { color:#58a6ff; text-decoration:none; padding:.12rem .38rem; border-radius:5px; cursor:pointer; white-space:nowrap; }
+.crumb-item:hover { background:#1a2035; }
+.crumb-item.current { color:#c9d1d9; cursor:default; }
+.crumb-item.current:hover { background:none; }
+.crumb-sep { color:#484f58; user-select:none; padding:0 .05rem; }
 #node-modal { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:999;align-items:center;justify-content:center;padding:1rem; }
 #node-modal .shell { background:#161b22;border:0.5px solid #30363d;border-radius:12px;width:min(920px,96vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden; }
 #node-modal header { display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid #30363d; }
@@ -92,12 +117,16 @@
 </div>
 <div id="search-results" style="margin-bottom:1rem;"></div>
 
+<nav class="crumb" id="crumb" aria-label="Directory path"></nav>
+
 <div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;">
-    <button class="btn" id="back-btn" style="display:none;">&#8592; All Files</button>
+    <button class="btn" id="back-btn" style="display:none;">&#8592; Back to files</button>
     <button class="btn" id="toggle-external-btn">+ Show pip imports</button>
 </div>
 
-<div class="svg-container">{{ svg | safe }}</div>
+<div class="svg-container" id="graph-viewport">
+    <div class="graph-strip" id="graph-strip"><div class="graph-lead" id="graph-lead"></div><div class="graph-panel" data-path="">{{ svg | safe }}</div></div>
+</div>
 <div id="node-modal">
     <div class="shell">
         <header>
@@ -106,6 +135,7 @@
                 <span id="modal-node" style="font-size:11px;color:#8b949e;font-family:monospace;"></span>
             </div>
             <div style="display:flex;align-items:center;gap:4px;">
+                <button id="modal-fullfile" title="Show the whole file">whole file</button>
                 <button id="modal-expand" title="Show file detail graph">&#9881;</button>
                 <button id="modal-back" title="Back to node list" style="display:none;">&#8592; back</button>
                 <button id="modal-close" title="Close">&times;</button>
@@ -364,11 +394,239 @@
     });
 
     // ── Graph drill-down ───────────────────────────────────────────────────
+    // Drilling is pure AJAX: the SVG is swapped in place and the page never
+    // reloads. The breadcrumb above the canvas is the only way "up" -- the
+    // ancestors are no longer drawn in the graph, so no column of the canvas
+    // is spent on the path and horizontal scrolling can't lose them.
     var _showExternal = false;
+    var curPath = '';
+    var _svgCache = {};      // 'path|external' -> payload, for hover-prefetch
 
+    // The canvas is a horizontal strip: one panel per directory on the path
+    // from the repo root down to wherever we are. Drilling appends a panel and
+    // slides the strip left, just far enough that the new panel's right edge
+    // -- the column of sub-folders -- lands on the right of the workspace.
+    // Panels are never torn down on the way *down*, so every directory already
+    // traversed is still a scroll away; the breadcrumb is the way back up.
+    //
+    // Every panel but the last is drawn WITHOUT its sub-folder column. Once
+    // the strip has slid across to static/, the static/ and templates/ labels
+    // still sitting on the root panel are only repeating the panel beside
+    // them. The files stay, so the path is still readable end to end.
+    var viewport = document.querySelector('.svg-container');
+    var strip    = document.getElementById('graph-strip');
+    var lead     = document.getElementById('graph-lead');
+    var panels   = [{ path: '', kids: true,
+                      el: strip.querySelector('.graph-panel') }];
+    var navToken = 0;        // bumped on every navigation, to drop stale ones
+
+    function dirUrl(path, kids) {
+        return '/projects/'+PID+'/graph/dir?path='+encodeURIComponent(path)+
+               '&external='+(_showExternal ? 'true' : 'false')+
+               '&children='+(kids ? 'true' : 'false');
+    }
+
+    function cacheKey(path, kids) {
+        return path + '|' + _showExternal + '|' + (kids ? '1' : '0');
+    }
+
+    // The shape the strip should end up in: one entry per ancestor, with only
+    // the last one -- the directory being stood in -- showing its children.
+    function wantedFor(path) {
+        var want = ancestorsOf(path);
+        return want.map(function(p, i) {
+            return { path: p, kids: (i === want.length - 1) };
+        });
+    }
+
+    // './ \u203a static/ \u203a vendor/' -- every ancestor is a click target.
+    function setCrumb() {
+        var el = document.getElementById('crumb');
+        if (!el) return;
+        var parts = curPath ? curPath.split('/') : [];
+        var acc   = [];
+        var html  = '<a class="crumb-item" data-path="">./</a>';
+        for (var i = 0; i < parts.length; i++) {
+            acc.push(parts[i]);
+            var p    = acc.join('/');
+            var last = (i === parts.length - 1);
+            html += '<span class="crumb-sep">\u203a</span>';
+            html += last
+                ? '<span class="crumb-item current">'+esc(parts[i])+'/</span>'
+                : '<a class="crumb-item" data-path="'+esc(p)+'">'+esc(parts[i])+'/</a>';
+        }
+        el.innerHTML = html;
+        el.querySelectorAll('a[data-path]').forEach(function(a) {
+            a.addEventListener('click', function() {
+                goDir(this.getAttribute('data-path'));
+            });
+            // Warm the cache on hover so the click itself has nothing to wait
+            // for. Same reason Google Maps streams tiles ahead of the viewport.
+            a.addEventListener('mouseenter', function() {
+                prefetchDir(this.getAttribute('data-path'));
+            });
+        });
+    }
+
+    // Warm the cache on hover so the click itself has nothing to wait for.
+    // Whatever the target, it becomes the panel being stood in -- the last one
+    // -- so its children are the column that will be wanted.
+    function prefetchDir(path) {
+        var key = cacheKey(path, true);
+        if (_svgCache[key]) return;
+        fetch(dirUrl(path, true))
+            .then(function(r){ return r.json(); })
+            .then(function(d){ _svgCache[key] = d; })
+            .catch(function(){ /* prefetch is best-effort */ });
+    }
+
+    // '' -> ['']; 'static/vendor' -> ['', 'static', 'static/vendor']
+    function ancestorsOf(p) {
+        var out = [''];
+        if (p) {
+            var parts = p.split('/'), acc = [];
+            for (var i = 0; i < parts.length; i++) {
+                acc.push(parts[i]);
+                out.push(acc.join('/'));
+            }
+        }
+        return out;
+    }
+
+    // `left` parks the panes flush with the left edge instead of the right.
+    // Used by the single-file view, which is one panel and has nothing to
+    // trail off to the left of it.
+    function setLead(px, animate) {
+        if (animate) { lead.style.width = px + 'px'; return; }
+        lead.style.transition = 'none';
+        lead.style.width = px + 'px';
+        void lead.offsetWidth;        // commit at 0s before re-arming the ease
+        lead.style.transition = '';
+    }
+
+    // Park the strip: push it right where it is narrower than the pane, then
+    // slide it left until the last panel's right edge -- the column of
+    // sub-folders -- is on the right of the workspace. Whatever that pushes
+    // off past the left edge is meant to go, and stays a scroll away.
+    //
+    // The scroll target is worked out from the strip's *final* geometry rather
+    // than read back off the DOM: the slack animation and the scroll below
+    // start in the same frame, so `offsetLeft` would hand back a half-finished
+    // position and park the panel short of the edge.
+    function parkStrip(animate, left) {
+        if (!panels.length) return;
+        var content = 0;
+        panels.forEach(function(p) { content += p.el.offsetWidth; });
+        var pane  = viewport.clientWidth;
+        var slack = left ? 0 : Math.max(0, pane - content);
+        setLead(slack, animate !== false);
+
+        var target = Math.max(0, slack + content - pane);
+        if (animate === false || !viewport.scrollTo) {
+            viewport.scrollLeft = target;
+            return;
+        }
+        viewport.scrollTo({ left: target, behavior: 'smooth' });
+    }
+
+    function addPanel(path, kids, svg) {
+        var el = document.createElement('div');
+        el.className = 'graph-panel';
+        el.setAttribute('data-path', path);
+        if (svg !== undefined) el.innerHTML = svg;
+        strip.appendChild(el);
+        var rec = { path: path, kids: kids, el: el };
+        panels.push(rec);
+        return rec;
+    }
+
+    // Reshape the strip into exactly root -> `path`, then park the camera.
+    function showPath(path, opts) {
+        opts = opts || {};
+        var status = document.getElementById('regen-status');
+        var want   = wantedFor(path);
+
+        if (opts.rebuild) { while (panels.length) { panels.pop().el.remove(); } }
+        // Anything that is not an ancestor of where we are going moves left for
+        // good: a path is a straight line, and the breadcrumb is how you get
+        // back to a branch you have already left.
+        while (panels.length &&
+               (panels.length > want.length ||
+                panels[panels.length - 1].path !== want[panels.length - 1].path)) {
+            panels.pop().el.remove();
+        }
+
+        // A retained panel can still be drawn the wrong way -- the one that was
+        // last is an ancestor now, so its column has to go. Redraw it in place
+        // rather than tearing the strip down, so the files do not flash.
+        var token = ++navToken;
+        var jobs  = [];
+        want.slice(0, panels.length).forEach(function(w, i) {
+            if (panels[i].kids !== w.kids) jobs.push({ w: w, at: i });
+        });
+        want.slice(panels.length).forEach(function(w) {
+            jobs.push({ w: w, at: -1 });
+        });
+
+        var pending = [];
+        jobs.forEach(function(j) {
+            j.payload = _svgCache[cacheKey(j.w.path, j.w.kids)];
+            if (!j.payload) pending.push(j);
+        });
+
+        var install = function() {
+            if (token !== navToken) return;     // a newer navigation won the race
+            jobs.forEach(function(j) {
+                // A panel only ever lands once its SVG is in hand, so the strip
+                // never has to lay out an empty box of unknown width.
+                if (j.at >= 0) {
+                    panels[j.at].el.innerHTML = j.payload.svg;
+                    panels[j.at].kids = j.w.kids;
+                    wireGraphClicks(panels[j.at].el);
+                } else {
+                    wireGraphClicks(addPanel(j.w.path, j.w.kids,
+                                             j.payload.svg).el);
+                }
+            });
+            parkStrip(opts.instant ? false : true);
+            status.style.display = 'none';
+        };
+
+        if (!jobs.length) { parkStrip(opts.instant ? false : true); return; }
+        if (!pending.length) { install(); return; }   // prefetched: no spinner
+
+        setStatus(status, 'Loading ./' + (path ? path + '/' : '') + '...', '#8b949e');
+        // The redraw of the outgoing panel rides along in the same round trip
+        // as the incoming one, so dropping its column costs no extra latency.
+        Promise.all(pending.map(function(j) {
+            return fetch(dirUrl(j.w.path, j.w.kids))
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    _svgCache[cacheKey(j.w.path, j.w.kids)] = d;
+                    j.payload = d;
+                });
+        })).then(install).catch(function(e) {
+            setStatus(status, 'Error: ' + e, '#f85149');
+        });
+    }
+
+    function renderDir(path, opts) {
+        opts = opts || {};
+        curPath = path || '';
+        document.getElementById('back-btn').style.display = 'none';
+        document.getElementById('toggle-external-btn').style.display = 'inline-block';
+        document.getElementById('regen-status').style.display = 'none';
+        setCrumb();
+        showPath(curPath, opts);
+    }
+
+    function goDir(path) { renderDir(path); }
+
+    // One file: collapse the strip down to a single panel and fit it to the
+    // pane. Backing out rebuilds the path we came from, which is why the
+    // panel keeps `curPath` as its path rather than the file's.
     function drillDown(filepath) {
         var status    = document.getElementById('regen-status');
-        var container = document.querySelector('.svg-container');
         var backBtn   = document.getElementById('back-btn');
         var toggleBtn = document.getElementById('toggle-external-btn');
         setStatus(status, 'Loading '+filepath+'...', '#8b949e');
@@ -376,13 +634,19 @@
         fetch('/projects/'+PID+'/graph/file/'+encodeURIComponent(filepath))
             .then(function(r){ return r.json(); })
             .then(function(data) {
+                ++navToken;                          // cancel a pending nav
+                while (panels.length) { panels.pop().el.remove(); }
+                var rec = addPanel(curPath, true, data.svg);
+                rec.el.classList.add('fit');
+                parkStrip(false, true);
+                wireGraphClicks(rec.el);
                 status.style.display = 'none';
-                container.innerHTML  = data.svg;
                 if (backBtn)   backBtn.style.display   = 'inline-block';
                 if (toggleBtn) toggleBtn.style.display = 'none';
-                wireGraphClicks();
             })
-            .catch(function(e){ setStatus(status, 'Error: '+e, '#f85149'); });
+            .catch(function(e) {
+                setStatus(status, 'Error: '+e, '#f85149');
+            });
     }
 
     // graphviz nests the anchor INSIDE the node group, so the node name lives
@@ -412,30 +676,40 @@
         return x ? x.replace(/^Click to expand\s+/, '').trim() : '';
     }
 
-    // 'artifact.py'              -> file node  -> open its node list
-    // 'artifact.py::ArtifactRepo' -> interior   -> open node list, jump to it
-    // 'Click to expand x.py'     -> file node  -> (tooltip-only fallback)
+    // './' or 'static/'      -> directory label -> drill into it
+    // 'artifact.py'          -> file node       -> open its node list
+    // 'artifact.py::Repo'    -> interior node   -> open node list, jump to it
     function refFromTitle(t) {
         t = (t || '').replace(/^Click to expand\s+/, '').trim();
         if (!t) return null;
         if (t.indexOf('->') >= 0) return null;   // edge title, e.g. app.py->artifact.py
+        if (t === './' || /\/$/.test(t)) {       // directory labels carry a slash
+            return { dir: t === './' ? '' : t.replace(/\/+$/, '') };
+        }
         if (t.indexOf('::') >= 0) {
             return { file: t.split('::')[0], nodeId: t };
         }
-        if (/\.(py|md|js|ts|c|h|cpp|rs|go|txt|rst)$/.test(t)) {
-            return { file: t, nodeId: null };
-        }
-        return null;
+        return { file: t, nodeId: null };        // any tracked file, parsed or not
     }
 
-    function wireGraphClicks() {
-        document.querySelectorAll('.svg-container a').forEach(function(a) {
+    // Scoped to one panel: panels are added, never swapped, so a document-wide
+    // sweep would stack duplicate handlers on the ones already on screen.
+    function wireGraphClicks(scope) {
+        (scope || viewport).querySelectorAll('a').forEach(function(a) {
+            var ref = refFromTitle(nodeTitle(a));
+            if (!ref) return;
             a.addEventListener('click', function(e) {
                 e.preventDefault();
-                var ref = refFromTitle(nodeTitle(a));
-                if (!ref) return;
+                if (ref.dir !== undefined) { goDir(ref.dir); return; }
                 openNodeModal(ref.file, ref.nodeId);
             });
+            // Only directory labels lead somewhere the camera has not been yet,
+            // so they are the ones worth warming on hover.
+            if (ref.dir !== undefined) {
+                a.addEventListener('mouseenter', function() {
+                    prefetchDir(ref.dir);
+                });
+            }
         });
     }
 
@@ -496,7 +770,10 @@
     function renderNodesPane() {
         var div = document.getElementById('modal-nodes');
         if (!modalState.nodes.length) {
-            div.innerHTML = '<div class="empty">No interior nodes parsed.</div>';
+            // Unparsed file (Dockerfile, LICENSE, *.html): no interior nodes to
+            // list, so drop straight to the file's source.
+            div.innerHTML = '<div class="empty">No interior nodes - showing file source.</div>';
+            showFullFile(modalState.file);
             return;
         }
         div.innerHTML = modalState.nodes.map(function(n, i) {
@@ -514,6 +791,11 @@
                 selectNode(parseInt(this.dataset.i));
             });
         });
+        // openNodeModal parks "Loading..." in the source pane and nothing else
+        // cleared it, so a file with nodes sat on that placeholder until a node
+        // was clicked.
+        document.getElementById('modal-source').innerHTML =
+            '<div class="empty">Select a node to view its source.</div>';
     }
 
     function selectNode(i) {
@@ -541,11 +823,35 @@
             });
     }
 
+    function showFullFile(filepath) {
+        var pane = document.getElementById('modal-source');
+        document.getElementById('modal-back').style.display = 'none';
+        document.getElementById('modal-node').textContent = '(whole file)';
+        modalState.pane = SOURCE_PANE;
+        pane.innerHTML = '<div class="empty">Loading source...</div>';
+        fetch('/projects/'+PID+'/graph/file_content/'+encodeURIComponent(filepath))
+            .then(function(r){ return r.json(); })
+            .then(function(data) {
+                var pre = document.createElement('pre');
+                pre.textContent = data.content || data.error || '(empty)';
+                pane.innerHTML = '';
+                pane.appendChild(pre);
+            })
+            .catch(function(e) {
+                pane.innerHTML = '<div class="empty">Error: '+esc(e.message)+'</div>';
+            });
+    }
+
     function closeNodeModal() {
         document.getElementById('node-modal').style.display = 'none';
         modalState = { file: null, nodes: [], pane: NODE_PANE };
     }
 
+    // A file with interior nodes used to offer no way to see the file as a
+    // whole -- only its individual nodes.
+    document.getElementById('modal-fullfile').addEventListener('click', function() {
+        if (modalState.file) showFullFile(modalState.file);
+    });
     document.getElementById('modal-close').addEventListener('click', closeNodeModal);
     document.getElementById('modal-back').addEventListener('click', function() {
         modalState.pane = NODE_PANE;
@@ -565,31 +871,28 @@
     document.getElementById('toggle-external-btn').addEventListener('click', function() {
         _showExternal = !_showExternal;
         this.textContent = _showExternal ? '- Hide pip imports' : '+ Show pip imports';
-        var status    = document.getElementById('regen-status');
-        var container = document.querySelector('.svg-container');
-        setStatus(status, 'Rendering...', '#8b949e');
-        fetch('/projects/'+PID+'/graph/svg?external='+_showExternal)
-            .then(function(r){ return r.json(); })
-            .then(function(data) {
-                status.style.display = 'none';
-                container.innerHTML  = data.svg;
-                wireGraphClicks();
-            })
-            .catch(function(e){ setStatus(status, 'Error: '+e, '#f85149'); });
+        // Every panel on screen is drawn for the old setting, so the strip has
+        // to be rebuilt from the root rather than patched.
+        renderDir(curPath, {rebuild: true});
     });
 
     document.getElementById('back-btn').addEventListener('click', function() {
-        this.style.display = 'none';
-        document.getElementById('toggle-external-btn').style.display = 'inline-block';
-        location.reload();
+        // Back out of the single-file detail graph to the directory we came
+        // from, rather than reloading to the root view.
+        renderDir(curPath, {rebuild: true});
     });
 
     // This page owns SVG click handling — keep residuality.js from layering
     // its own (legacy) handlers on top and double-firing.
     window.__graphClicksOwned = true;
 
-    // Wire clicks on initial SVG
-    wireGraphClicks();
+    // The root panel is rendered server-side; make it behave like the rest.
+    setCrumb();
+    parkStrip(false);
+    wireGraphClicks(panels[0].el);
+
+    // The strip is parked against the pane's width, so a resize re-parks it.
+    window.addEventListener('resize', function() { parkStrip(false); });
 
 })();
 </script>

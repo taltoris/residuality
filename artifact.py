@@ -80,7 +80,8 @@ _LANGUAGE_RULES = {
         "functions": {
             "function_definition": {"name_field": "declarator",
                                     "unwrap": ["declarator", "declarator"],
-                                    "name_is_self": True},
+                                    "name_is_self": True,
+                                    "name_includes_params": True},
         },
         "imports": [
             {"type": "preproc_include", "field": "path"},
@@ -96,7 +97,8 @@ _LANGUAGE_RULES = {
         "functions": {
             "function_definition": {"name_field": "name",
                                     "unwrap": ["declarator", "declarator"],
-                                    "name_is_self": True},
+                                    "name_is_self": True,
+                                    "name_includes_params": True},
         },
         "imports": [
             {"type": "preproc_include", "field": "path"},
@@ -494,7 +496,14 @@ class ArtifactRepo:
 
         nodes = []
         edges = []
-        lines = source.count(b'\n') + 1
+        # A trailing newline *terminates* the last line rather than starting a
+        # new one, so counting without the +1 keeps the file node from claiming
+        # one line more than the file has. Prose files already used the line
+        # count, so the two paths disagreed on every file ending in a newline.
+        lines = source.count(b'\n')
+        if not source.endswith(b'\n'):
+            lines += 1
+        lines = max(lines, 1)
 
         nodes.append(
             f'    "{filepath}" [type="file", line_start=1, line_end={lines}];'
@@ -562,6 +571,13 @@ class ArtifactRepo:
             for ftype, fspec in rules["functions"].items():
                 if node.type != ftype:
                     continue
+                # `unwrap` descends to the *declarator* to read the name, but
+                # the span has to come from this outermost node. In C/C++ a
+                # declarator covers only the signature line, so recording its
+                # span gave every function a one-line body -- parse_array came
+                # out as 81-81 instead of 81-102, and the detail modal had
+                # nothing to show but the declaration.
+                span = node
                 fn_node = node
                 unwrap = fspec.get("unwrap")
                 if unwrap:
@@ -580,11 +596,16 @@ class ArtifactRepo:
                 fn_name  = node_text(name_node)
                 fn_parent = class_id if class_id else parent_id
                 fn_id    = f"{fn_parent}::{fn_name}"
-                sig      = escape(fn_name + "(...)")
+                # A C/C++ declarator already carries the parameter list, so
+                # appending "(...)" gave "parse_array(cJSON *item, const char
+                # *value)(...)". Only elide params where the name lacks them
+                # (Python/JS/Rust read the bare identifier).
+                sig      = escape(fn_name if fspec.get("name_includes_params")
+                                  else fn_name + "(...)")
                 nodes.append(
                     f'    "{fn_id}" [type="function", file="{filepath}", '
-                    f'line_start={fn_node.start_point[0]+1}, '
-                    f'line_end={fn_node.end_point[0]+1}, signature="{sig}"];'
+                    f'line_start={span.start_point[0]+1}, '
+                    f'line_end={span.end_point[0]+1}, signature="{sig}"];'
                 )
                 edges.append(f'    "{fn_parent}" -> "{fn_id}" '
                              f'[label="contains"];')
@@ -685,8 +706,22 @@ class ArtifactRepo:
             sec_id     = m.group(1)
             sec_label  = m.group(2).replace('"', '\\"')
             sec_text   = m.group(3)
-            start_line = source[:m.start()].count('\n') + 1
-            end_line   = source[:m.end()].count('\n') + 1
+
+            # Span the prose, not the marker pair. The `<!-- rs:section -->`
+            # markers are metadata for downstream prompt-building; counting
+            # them in the span made a section's source view two lines of HTML
+            # comment around one line of story, and disagreed with word_count,
+            # which only ever counted the prose.
+            if sec_text.strip():
+                lead      = len(sec_text) - len(sec_text.lstrip())
+                trail     = len(sec_text) - len(sec_text.rstrip())
+                start_off = m.start(3) + lead
+                end_off   = m.end(3) - trail
+            else:
+                start_off, end_off = m.start(), m.end()
+
+            start_line = source[:start_off].count('\n') + 1
+            end_line   = source[:end_off].count('\n') + 1
             word_count = len(sec_text.split())
             node_id    = f"{filepath}::{sec_id}"
 
@@ -711,15 +746,14 @@ class ArtifactRepo:
 
     def get_node_at_line(self, filepath: str, line: int) -> Optional[dict]:
         """Return the graph node (function/section) containing a given line."""
-        import pydot
+        from graph import load_graph
         dot_path = self.repo_path / ".residuality" / "graph.dot"
         if not dot_path.exists():
             return None
         try:
-            graphs = pydot.graph_from_dot_file(str(dot_path))
-            if not graphs:
+            graph = load_graph(str(dot_path))
+            if not graph:
                 return None
-            graph = graphs[0]
             best  = None
             best_size = 999999
             for node in graph.get_nodes():

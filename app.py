@@ -28,7 +28,8 @@ from snapshot  import (ensure_collection as ensure_snapshot_collection,
                        format_snapshot_for_context)
 from context   import ContextBuilder
 from owui_client import OWUIClient
-from graph import render_file_graph, render_file_detail, load_graph, get_node_by_id, get_neighbors, export_prose
+from graph import (render_file_graph, render_file_detail, render_directory_graph,
+                    load_graph, get_node_by_id, get_neighbors, export_prose)
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -99,6 +100,24 @@ def get_repo(project_id: str) -> ArtifactRepo:
     if not repo.exists():
         abort(404, f"Project '{project_id}' not found")
     return repo
+
+
+def _tracked_files(repo: ArtifactRepo) -> list:
+    """Every tracked, non-gitignored file in the working tree.
+
+    Deliberately not graph.dot: the directory view has to show Dockerfile,
+    LICENSE, .env.example, requirements.txt and templates/*.html, none of which
+    any parser handles. Files appear here from their first commit onward.
+    """
+    try:
+        out = repo.repo.git.ls_files()
+    except Exception as e:
+        logger.warning(f"ls_files failed, falling back to HEAD tree: {e}")
+        try:
+            return repo.list_files()
+        except Exception:
+            return []
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
 
 
 def index_commit_async(repo: ArtifactRepo, commit_hash: str,
@@ -314,10 +333,9 @@ def chat_send(project_id: str):
 
     if node_id:
         dot_path = repo.repo_path / ".residuality" / "graph.dot"
-        import pydot as _pydot
-        graphs = _pydot.graph_from_dot_file(str(dot_path))
-        if graphs:
-            node = get_node_by_id(graphs[0], node_id)
+        graph = load_graph(str(dot_path))
+        if graph:
+            node = get_node_by_id(graph, node_id)
             if node and node.get("file"):
                 try:
                     file_lines = repo.read(node["file"]).splitlines()
@@ -333,7 +351,6 @@ def chat_send(project_id: str):
         is_code  = any(artifact_path.endswith(ext) for ext in
                       ('.py', '.js', '.ts', '.cpp', '.c', '.h', '.rs', '.go'))
         if is_code and dot_path.exists():
-            import pydot as _pydot
             graph = load_graph(str(dot_path))
             if graph:
                 node_results = search_graph_nodes(user_message, project_id=project_id, limit=1)
@@ -432,7 +449,9 @@ def graph_view(project_id: str):
     repo        = get_repo(project_id)
     dot_path    = str(repo.repo_path / ".residuality" / "graph.dot")
     dot_content = repo.get_graph_dot()
-    svg         = render_file_graph(dot_path)
+    # Root of the drill-down view; `graph/svg` (flat file graph) is still
+    # available for anyone who wants the old level-1 canvas.
+    svg         = render_directory_graph(dot_path, _tracked_files(repo), "")
     return render_template("graph.html",
                            project_id=project_id,
                            svg=svg,
@@ -448,6 +467,29 @@ def graph_svg(project_id: str):
     show_ext = request.args.get("external", "false").lower() == "true"
     svg      = render_file_graph(dot_path, show_external=show_ext)
     return jsonify({"svg": svg})
+
+
+@app.route("/projects/<project_id>/graph/dir")
+@login_required
+def graph_dir(project_id: str):
+    """Directory drill-down view for one path (blank = repo root).
+
+    The directory's name is the label on its box of files and the child
+    directories are the column at the far right of the canvas. Import edges are
+    retargeted to the deepest visible node on the target's path.
+
+    `children=false` drops that column, for the panels the strip has already
+    slid past: their sub-folder labels are the panels sitting to their right.
+    """
+    repo     = get_repo(project_id)
+    dot_path = str(repo.repo_path / ".residuality" / "graph.dot")
+    path     = request.args.get("path", "").strip("/")
+    show_ext = request.args.get("external", "false").lower() == "true"
+    show_kid = request.args.get("children", "true").lower() == "true"
+    svg      = render_directory_graph(dot_path, _tracked_files(repo), path,
+                                      show_external=show_ext,
+                                      show_children=show_kid)
+    return jsonify({"svg": svg, "path": path})
 
 
 @app.route("/projects/<project_id>/graph/file/<path:filepath>")
@@ -1013,29 +1055,42 @@ def graph_node_content(project_id: str, node_id: str):
 
     node = get_node_by_id(graph, node_id)
 
-    # If it's a file node, return full file
-    if not node:
-        try:
-            content = repo.read(node_id)
-            return jsonify({"content": content, "type": "file"})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 404
+    # File and chapter nodes carry no `file=` attribute — their id *is* the
+    # path. Slicing with node["file"] read "" and resolved to the repo root,
+    # so every file node answered 500 "Is a directory" and a file's whole
+    # content was unreachable from the graph.
+    is_file_node = bool(node) and (node["type"] in ("file", "chapter")
+                                   or not node["file"])
 
     # Return just the node's lines
+    if node and not is_file_node:
+        try:
+            file_lines = repo.read(node["file"]).splitlines()
+            content    = "\n".join(
+                file_lines[node["line_start"] - 1 : node["line_end"]]
+            )
+            return jsonify({
+                "content":    content,
+                "type":       node["type"],
+                "file":       node["file"],
+                "line_start": node["line_start"],
+                "line_end":   node["line_end"],
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # Whole file: a file/chapter node, or an id that is a plain path.
     try:
-        file_lines = repo.read(node["file"]).splitlines()
-        content    = "\n".join(
-            file_lines[node["line_start"] - 1 : node["line_end"]]
-        )
+        content = repo.read(node_id)
         return jsonify({
             "content":    content,
-            "type":       node["type"],
-            "file":       node["file"],
-            "line_start": node["line_start"],
-            "line_end":   node["line_end"],
+            "type":       "file",
+            "file":       node_id,
+            "line_start": 1,
+            "line_end":   len(content.splitlines()),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 404
 
 
 @app.route("/projects/<project_id>/graph/nodes/<path:filepath>")

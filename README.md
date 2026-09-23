@@ -14,7 +14,7 @@ store). Nothing leaves your machine.
 | Concept | How it works |
 |---|---|
 | **Artifact store** | Every project is a real git repo under `/repos/<project_id>`. `read`, `write`, `branch`, `merge`, `checkout`, `diff` — all backed by GitPython. |
-| **Graph** | `tree-sitter` parses `.py` files (and `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
+| **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts` and `.rs` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
 | **Memory** | Each commit indexes its message and its graph nodes into Qdrant, and generates an *episodic snapshot* (state, decisions, open questions) that is also vectorised. |
 | **Chat** | Chat is scoped to a project. It pulls in the rolling summary, the last few exchanges, and — keyword-triggered — relevant commits or relevant graph nodes. It edits one node at a time, not whole files. |
 | **Merge** | Pick two divergent commits; the model reconciles conflicting files into a merge commit with two parents. |
@@ -34,7 +34,7 @@ store). Nothing leaves your machine.
   │  (vectors)          │        │  snapshot.py         │
   └─────────────────────┘        │  context.py          │
                                  │  owui_client.py      │
-  ┌─────────────────────┐        │  graph.py   pydot    │
+  ┌─────────────────────┐        │  graph.py            │
   │ Embed svc   :8090   │◄───────┘                      │
   │ (nomic-embed-text)  │         └────────────────────┘
   └─────────────────────┘                    
@@ -115,7 +115,13 @@ and the default credentials are committed in `docker-compose.yml`.
 2. **Build the graph** — ⚙ *Build Graph* runs tree-sitter over every `.py`/`.md`
    (skipping `.git`, `.residuality`, `export`, and files over 500 KB) and commits the
    result.
-3. **Drill down** — click a file in the SVG to see its classes and functions; click a
+3. **Drill down** — the canvas opens on the repo root with the folder's name above its
+   box of files and its sub-folders as the column on the right. Clicking one slides the
+   strip left until that folder sits on the right of the workspace; everything you came
+   through stays a horizontal scroll back to. Only the folder you are standing in keeps
+   that sub-folder column — the panels already slid past drop theirs, since their labels
+   *are* the panels to their right — but they keep every file, so the whole path stays
+   readable end to end. Click a file in the SVG to see its classes and functions; click a
    node to view its exact source span and its neighbours (`contains`, `calls`, `imports`,
    `precedes`).
 4. **Edit a node** — pick a function or section, give an instruction, and the model
@@ -137,6 +143,11 @@ become `type="section"` nodes with `precedes` edges:
 The door had never been locked. That was the part she couldn't forgive.
 <!-- /rs:section -->
 ```
+
+A section node's span covers the prose *between* the markers, not the markers
+themselves — they are metadata for prompt-building, and `word_count` has always
+counted only the prose. So `s3` above is one line, not three. An empty section
+falls back to spanning its marker pair, since it has no prose to point at.
 
 `graph.export_prose` strips those markers when exporting clean `.md` out of `export/`.
 
@@ -167,6 +178,11 @@ The door had never been locked. That was the part she couldn't forgive.
 - `indexer.py` and `snapshot.py` each carry their own `_embed`, `_ensure_collection`
   and upsert/search helpers. Identical code, different names.
 - `apply_edits` trusts `line_start`/`line_end` without bounds checks.
+- *Build Graph* skips files over 500 KB, so a minified vendor bundle (a 2.4 MB
+  `babel.min.js`) never gets a section — the directory view still lists it, since
+  that comes from `git ls-files` rather than `graph.dot`. Bundles just under the
+  limit are indexed, and their minified single-letter names then collide into
+  duplicate node ids.
 
 ---
 
