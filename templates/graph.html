@@ -770,8 +770,8 @@
     function renderNodesPane() {
         var div = document.getElementById('modal-nodes');
         if (!modalState.nodes.length) {
-            // Unparsed file (Dockerfile, LICENSE, *.html): no interior nodes to
-            // list, so drop straight to the file's source.
+            // Unparsed file (Dockerfile, LICENSE, requirements.txt): no
+            // interior nodes to list, so drop straight to the file's source.
             div.innerHTML = '<div class="empty">No interior nodes - showing file source.</div>';
             showFullFile(modalState.file);
             return;

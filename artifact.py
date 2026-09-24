@@ -35,7 +35,9 @@ GITHUB_TOKEN   = os.getenv("GITHUB_TOKEN", "")
 #               stripped by `_strip_delimiters`.
 #
 # Adding a language: add the entry here, add the tree-sitter-* binding to
-# requirements.txt and the extension to _EXTENSION_TO_LANG.
+# requirements.txt and the extension to _EXTENSION_TO_LANG. HTML is the one
+# exception: its grammar hangs no fields on `element` for a rules entry to key
+# off, so it is parsed by `_update_html_graph` instead.
 
 _EXTENSION_TO_LANG = {
     ".py":    "python",
@@ -55,6 +57,8 @@ _EXTENSION_TO_LANG = {
     ".ts":    "javascript",
     ".tsx":   "javascript",
     ".rs":    "rust",
+    ".html":  "html",
+    ".htm":   "html",
 }
 
 _LANGUAGE_RULES = {
@@ -155,6 +159,47 @@ def _strip_delimiters(text: str) -> str:
     if len(text) >= 2 and (text[0], text[-1]) in pairs:
         return text[1:-1]
     return text
+
+
+# ── HTML / Jinja ──────────────────────────────────────────────────────────
+
+# `src`/`href` on these elements is a real dependency of the page (a script, a
+# stylesheet); an <img>/<video>/<a> is content or navigation, not composition,
+# so it is left out.
+_HTML_ASSET_ATTR = {"script": "src", "link": "href"}
+
+# `{{ url_for('static', filename='vendor/react.js') }}` is the one template
+# form that carries a repo path; every other template-shaped value is skipped
+# rather than guessed at.
+_HTML_URL_FOR_STATIC = re.compile(r"filename\s*=\s*['\"]([^'\"]+)['\"]")
+
+# Jinja composition: `{% extends "base.html" %}`, `{% include "x.html" %}`,
+# and the macro forms `{% import "forms.html" %}` / `{% from "forms.html"
+# import field %}`.
+_HTML_TEMPLATE_IMPORT = re.compile(
+    r"\{%-?\s*(?:extends|include|import|from)\s+['\"]([^'\"]+)['\"]"
+)
+
+
+def _html_asset_target(value: Optional[str]) -> Optional[str]:
+    """Repo path (or off-repo URL) an HTML asset attribute points at.
+
+      '/static/residuality.js'                          -> '/static/residuality.js'
+      "{{ url_for('static', filename='vendor/r.js') }}" -> 'static/vendor/r.js'
+      'https://cdn.example.com/x.js'                    -> unchanged (off-repo)
+      '#chat-log', '{{ url_for("chat") }}'              -> None (not a file)
+
+    Values are handed on un-resolved: `graph.resolve_import` decides whether an
+    off-repo URL becomes an external stub, so the same string the template
+    contains is what an unresolved edge shows.
+    """
+    v = (value or "").strip()
+    if not v or v.startswith("#"):
+        return None
+    if "{" in v:
+        m = _HTML_URL_FOR_STATIC.search(v)
+        return f"static/{m.group(1).lstrip('/')}" if m else None
+    return v
 
 
 class ArtifactRepo:
@@ -460,7 +505,10 @@ class ArtifactRepo:
             return
 
         lang = self._lang_key(filepath)
-        if lang:
+        if lang == "html":
+            # Not `_LANGUAGE_RULES` — see `_update_html_graph`.
+            self._update_html_graph(filepath, dot_path)
+        elif lang:
             self._update_code_graph(filepath, _LANGUAGE_RULES[lang], dot_path)
         elif filepath.endswith(".md"):
             self._update_prose_graph(filepath)
@@ -736,6 +784,180 @@ class ArtifactRepo:
             prev_id = node_id
 
         self._write_dot_section(filepath, nodes, edges, dot_path)
+
+    def _update_html_graph(self, filepath: str, dot_path: Path) -> None:
+        """Parse an HTML/Jinja file with tree-sitter-html and update graph.dot.
+
+        Dispatched here rather than through `_LANGUAGE_RULES`, because the
+        grammar gives a rules entry nothing to hold on to: `element` carries
+        no fields at all (both the tag name and every attribute live inside
+        the `start_tag` child, and `tag_name` is not a named field either), so
+        there is no `name_field` to read a node's name from — and one node per
+        element would be thousands of nodes for a single page.
+
+        What is worth a node in a template is narrower:
+          - every element declaring an `id` — the addressable chunk a surgical
+            node edit targets, and the same idea as a prose `rs:section`;
+          - inline `<script>`/`<style>` blocks — where a page's real code
+            lives, and the only node covering it;
+          - `src`/`href` assets and Jinja `{% extends %}` / `{% include %}` —
+            the page's import edges.
+
+        Jinja braces are opaque to the grammar (a `{% extends %}` ends up
+        inside a plain text node), so composition is read off the raw text
+        while structure comes from the parse.
+        """
+        import importlib
+
+        from tree_sitter import Language, Parser
+
+        full_path = self.repo_path / filepath
+        source    = full_path.read_bytes()
+        text      = source.decode("utf-8", errors="replace")
+
+        html_module = importlib.import_module("tree_sitter_html")
+        parser      = Parser(Language(html_module.language()))
+        tree        = parser.parse(source)
+
+        # Same line count as the code path: a trailing newline terminates the
+        # last line rather than starting a new one.
+        n_lines = source.count(b'\n')
+        if not source.endswith(b'\n'):
+            n_lines += 1
+        n_lines = max(n_lines, 1)
+
+        def escape(s: str) -> str:
+            return s.replace('"', '\\"').replace('\n', ' ')
+
+        def node_text(n) -> str:
+            return source[n.start_byte:n.end_byte].decode("utf-8", errors="replace")
+
+        def start_tags(node):
+            """The element's opening tag — `start_tag`, or `self_closing_tag`."""
+            for child in node.children:
+                if child.type in ("start_tag", "self_closing_tag"):
+                    yield child
+
+        def tag_name(node) -> str:
+            """'div' for a `<div>`; empty when the body has no opening tag."""
+            for tag in start_tags(node):
+                for child in tag.children:
+                    if child.type == "tag_name":
+                        return node_text(child).strip().lower()
+            return ""
+
+        def attr(node, want: str) -> Optional[str]:
+            """Value of one attribute on the element's opening tag, or None.
+
+            Read positionally, not by field name: this grammar exposes no
+            field metadata at all — `child_by_field_name` answers None for
+            every `attribute`, `name` and `value` included — so the name is
+            whatever precedes the first '=' and the value is the one child
+            after it, quoted or bare. A boolean attribute (`disabled`) has no
+            value child and reads as "".
+            """
+            for tag in start_tags(node):
+                for child in tag.children:
+                    if child.type != "attribute":
+                        continue
+                    if node_text(child).split("=", 1)[0].strip().lower() != want:
+                        continue
+                    for part in child.children:
+                        if part.type in ("quoted_attribute_value",
+                                         "attribute_value"):
+                            return node_text(part).strip().strip("'\"")
+                    return ""
+            return None
+
+        nodes = [f'    "{filepath}" [type="file", line_start=1, '
+                 f'line_end={n_lines}];']
+        edges = []
+
+        taken: set = {filepath}
+        blocks: dict = {}
+
+        def unique(nid: str) -> str:
+            """A node id nothing else on this page already owns.
+
+            A duplicate `id=` is invalid HTML but everywhere, and a second
+            node under the first one's id would overwrite its Qdrant point —
+            the same silent collision the minified-JS bundle causes.
+            """
+            if nid in taken:
+                n = 2
+                while f"{nid}~{n}" in taken:
+                    n += 1
+                nid = f"{nid}~{n}"
+            taken.add(nid)
+            return nid
+
+        def walk(node, parent_id: str) -> None:
+            """Depth-first, carrying the nearest enclosing node id down."""
+            nid = parent_id
+            if node.type in ("element", "script_element", "style_element"):
+                tag     = tag_name(node)
+                elem_id = (attr(node, "id") or "").strip() if tag else ""
+                if tag and elem_id and "{" not in elem_id:
+                    nid   = unique(f"{filepath}::{tag}#{elem_id}")
+                    label = elem_id
+                    # No '"' in a signature: `render_file_detail` interpolates
+                    # it straight into a DOT label, and the escaped quote
+                    # written here swallowed the rest of the attribute list
+                    # when it was read back and re-emitted.
+                    sig   = f"{tag} #{elem_id}"
+                elif tag and any(c.type == "raw_text"
+                                 and node_text(c).strip() for c in node.children):
+                    # A block with real text in it. `<script src="...">` is not
+                    # one: its raw_text is empty, and its content is the import
+                    # edge below.
+                    blocks[tag] = blocks.get(tag, 0) + 1
+                    nid   = unique(f"{filepath}::{tag}#{blocks[tag]}")
+                    label = f"inline {tag}"
+                    # Never '<script>': graphviz reads any quoted label that
+                    # opens with '<' and closes with '>' as an HTML-like label,
+                    # and `<script>` is not valid HTML-label markup — it fails
+                    # the whole file's render with a syntax error.
+                    sig   = (f"inline {tag}" if blocks[tag] == 1
+                             else f"inline {tag} #{blocks[tag]}")
+                else:
+                    nid = parent_id
+                if nid != parent_id:
+                    nodes.append(
+                        f'    "{nid}" [type="section", file="{filepath}", '
+                        f'line_start={node.start_point[0] + 1}, '
+                        f'line_end={node.end_point[0] + 1}, '
+                        f'signature="{escape(sig)}", '
+                        f'label="{escape(label)}"];'
+                    )
+                    edges.append(f'    "{parent_id}" -> "{nid}" '
+                                 f'[label="contains"];')
+            for child in node.children:
+                walk(child, nid)
+
+        walk(tree.root_node, parent_id=filepath)
+
+        targets = []
+
+        def collect_assets(node) -> None:
+            if node.type in ("element", "script_element"):
+                want = _HTML_ASSET_ATTR.get(tag_name(node))
+                if want:
+                    target = _html_asset_target(attr(node, want))
+                    if target:
+                        targets.append(target)
+            for child in node.children:
+                collect_assets(child)
+
+        collect_assets(tree.root_node)
+        targets.extend(_HTML_TEMPLATE_IMPORT.findall(text))
+
+        for target in dict.fromkeys(targets):
+            edges.append(f'    "{filepath}" -> "{escape(target)}" '
+                         f'[label="imports"];')
+
+        self._write_dot_section(filepath, nodes, edges, dot_path)
+        logger.info(f"graph(html): {filepath} -> {len(nodes)} nodes, "
+                    f"{len(edges)} edges")
 
     def get_graph_dot(self) -> str:
         """Return current graph.dot contents."""

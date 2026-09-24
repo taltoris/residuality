@@ -773,7 +773,7 @@ def regenerate_graph(project_id: str):
         except Exception:
             return False
 
-    for ext in ("*.py", "*.md"):
+    for ext in ("*.py", "*.md", "*.html", "*.htm"):
         for f in sorted(repo.repo_path.rglob(ext)):
             rel = str(f.relative_to(repo.repo_path))
             if _is_ignored(rel):

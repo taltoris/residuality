@@ -187,7 +187,7 @@ def _parse_attr_list(blob: str) -> dict:
 def _parse_dot_file(dot_path: str):
     """Read a dot file as one statement per line.
 
-    dot_updater emits exactly one node or edge per line, so a line walk is
+    Every writer emits exactly one node or edge per line, so a line walk is
     sufficient -- a general DOT parser buys nothing here. Blank lines, `//`
     comments, the `digraph {`/`}` braces and the graph/node/edge default
     statements are skipped, because no caller reads them.
@@ -298,6 +298,7 @@ def get_neighbors(graph, node_id: str) -> dict:
 _FILENAME_TAILS = {
     "h", "hh", "hpp", "hxx", "inc", "c", "cc", "cpp", "cxx", "rs",
     "py", "pyi", "js", "mjs", "cjs", "jsx", "ts", "tsx", "json",
+    "html", "htm", "xhtml",
 }
 
 
@@ -307,6 +308,7 @@ def _import_label(name: str) -> str:
       'os.path'    -> 'path'      python module namespace
       'stdio.h'    -> 'stdio.h'   C include: '.h' is an extension, not a scope
       'sys/stat.h' -> 'sys/stat.h'
+      'base.html'  -> 'base.html' Jinja extends/include target
 
     A naive `split('.')[-1]` reduced every C `#include` to its extension, so
     the whole import column in a C file's detail view read 'h'.
@@ -623,14 +625,36 @@ def resolve_import(raw_target: str, importer_dir: str, current_dir: str,
     if not t:
         return (None, None)
 
+    # A URL with a scheme (or protocol-relative) is never a repo path. It has
+    # to be caught before the bare-filename fallback below, or a CDN copy of a
+    # vendored bundle -- 'https://unpkg.com/.../react.production.min.js' --
+    # draws an edge to the local file of the same name and the page reads as
+    # depending on a bundle it never loads.
+    if re.match(r"[A-Za-z][A-Za-z0-9+.\-]*://", t) or t.startswith("//"):
+        return (None, None)
+
     # Relative-path import (JS/TS): resolve against the importing file's dir.
-    if t.startswith(".") or t.startswith("/"):
-        cand = posixpath.normpath(posixpath.join(importer_dir, t.lstrip("/")))
-        for probe in (cand, *(cand + e for e in _MODULE_EXTS)):
-            if probe in known:
-                return ("file", probe)
-        if cand in set(dir_keys.values()):
-            return ("dir", cand)
+    # A '/'-rooted target is ambiguous: in an HTML asset it is repo-root
+    # relative ('/static/residuality.js'), while in a JS bundle it is relative
+    # to the importing file ('/helpers/util.js'). Try the root reading first
+    # and keep the old one as the fallback, so nothing that resolves today
+    # stops resolving.
+    if t.startswith("/"):
+        cands = [posixpath.normpath(t.lstrip("/")),
+                 posixpath.normpath(posixpath.join(importer_dir, t.lstrip("/")))]
+    elif t.startswith("."):
+        cands = [posixpath.normpath(posixpath.join(importer_dir, t))]
+    else:
+        cands = []
+    if cands:
+        for cand in cands:
+            for probe in (cand, *(cand + e for e in _MODULE_EXTS)):
+                if probe in known:
+                    return ("file", probe)
+        dir_set = set(dir_keys.values())
+        for cand in cands:
+            if cand in dir_set:
+                return ("dir", cand)
         return (None, None)
 
     # Exact repo path, or a bare filename such as 'cJSON.h'.

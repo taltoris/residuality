@@ -10,13 +10,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Build dot_updater C binary
-COPY cJSON.h cJSON.c dot_updater.c ./
-RUN gcc -O2 -o dot_updater dot_updater.c cJSON.c -lm \
-    && mv dot_updater /usr/local/bin/dot_updater \
-    && rm cJSON.h cJSON.c dot_updater.c
-
-# Install Python dependencies (includes tree-sitter + tree-sitter-python bindings)
+# Install Python dependencies (includes the tree-sitter language bindings)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

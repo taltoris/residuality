@@ -11,3 +11,4 @@ tree-sitter-c>=0.23
 tree-sitter-javascript>=0.23
 tree-sitter-cpp>=0.23
 tree-sitter-rust>=0.23
+tree-sitter-html>=0.23

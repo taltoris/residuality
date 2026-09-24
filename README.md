@@ -14,7 +14,7 @@ store). Nothing leaves your machine.
 | Concept | How it works |
 |---|---|
 | **Artifact store** | Every project is a real git repo under `/repos/<project_id>`. `read`, `write`, `branch`, `merge`, `checkout`, `diff` — all backed by GitPython. |
-| **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts` and `.rs` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
+| **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts`, `.rs` and `.html`/`.htm` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions, template sections and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
 | **Memory** | Each commit indexes its message and its graph nodes into Qdrant, and generates an *episodic snapshot* (state, decisions, open questions) that is also vectorised. |
 | **Chat** | Chat is scoped to a project. It pulls in the rolling summary, the last few exchanges, and — keyword-triggered — relevant commits or relevant graph nodes. It edits one node at a time, not whole files. |
 | **Merge** | Pick two divergent commits; the model reconciles conflicting files into a merge commit with two parents. |
@@ -112,7 +112,7 @@ and the default credentials are committed in `docker-compose.yml`.
 1. **Create a project** — either a fresh repo or link an existing one (`/projects/new`).
    Residuality writes `.residuality/extract-python.scm`, an empty `graph.dot`, and a default
    `.gitignore`, then commits them as `Init project: <id>`.
-2. **Build the graph** — ⚙ *Build Graph* runs tree-sitter over every `.py`/`.md`
+2. **Build the graph** — ⚙ *Build Graph* runs tree-sitter over every `.py`/`.md`/`.html`
    (skipping `.git`, `.residuality`, `export`, and files over 500 KB) and commits the
    result.
 3. **Drill down** — the canvas opens on the repo root with the folder's name above its
@@ -151,6 +151,38 @@ falls back to spanning its marker pair, since it has no prose to point at.
 
 `graph.export_prose` strips those markers when exporting clean `.md` out of `export/`.
 
+### HTML / Jinja templates
+
+`.html`/`.htm` is parsed by `tree-sitter-html`, but through its own extractor
+(`artifact._update_html_graph`) rather than the `_LANGUAGE_RULES` table. That grammar
+exposes **no fields at all** — `element` has none, and an attribute's name and value have
+to be read positionally — so there is no `name_field` for a rules entry to key off, and a
+node per element would be thousands of nodes for one page. What becomes a node instead:
+
+| In the template | In the graph |
+|---|---|
+| `<div id="chat-messages">` | `type="section"`, id `<file>::<tag>#<id>`, spanning start tag to end tag |
+| an `id` element nested in another | `contains` edge from the enclosing section, not from the file |
+| inline `<script>` / `<style>` | `type="section"`, `<file>::script#1` / `<file>::style#1`, numbered per tag |
+| `<script src>`, `<link href>` | `imports` edge |
+| `{% extends %}`, `{% include %}`, `{% import %}`, `{% from %}` | `imports` edge (read off the raw text — the grammar leaves Jinja inside a text node) |
+
+`/static/app.js`-style targets resolve repo-root-relative, and
+`{{ url_for('static', filename='vendor/x.js') }}` resolves through its `filename=`. A
+`<script src="...">` is *not* an inline section — its `raw_text` is empty, and the `src`
+is the edge. A duplicate `id` gets a `~2` suffix rather than silently overwriting the
+first node's vector. A page with no `id`s and no inline blocks gets just its file node.
+
+Two sharp edges worth keeping in mind when adding anything here:
+
+- **Signatures are deliberately quote-free** — `div #input-area`, never
+  `div id="input-area"`. `graph.render_file_detail` splices a signature straight into a
+  DOT label, and the escaped `\"` written into graph.dot swallowed the rest of that
+  node's attribute list the moment it was read back and re-emitted.
+- **Never a signature that opens with `<` and closes with `>`.** graphviz reads any such
+  label as an HTML-like label, and `<script>` is not valid HTML-label markup, so the whole
+  file's view dies on a syntax error. Hence `inline script`, not `<script>`.
+
 ---
 
 ## Design notes
@@ -160,7 +192,9 @@ falls back to spanning its marker pair, since it has no prose to point at.
   block leaves every other project file untouched. The write is atomic (`write` to
   `<file>.tmp`, then `rename()`).
 - **Node IDs are hierarchical:** `<file>::<Class>::<method>`. A top-level function is
-  `<file>::<fn>`. This doubles as the Qdrant payload key (`uuid5` over `node-<id>`).
+  `<file>::<fn>`, an HTML section is `<file>::<tag>#<id>` (`templates/base.html::div#input-area`),
+  a prose section is `<file>::<section-id>`. This doubles as the Qdrant payload key
+  (`uuid5` over `node-<id>`).
 - **Two project types, two snapshot shapes.** `snapshot.detect_project_type` picks
   `fiction` (reader knows / open threads / tone / last hook) versus `code`
   (current task / key decisions / what's working / what's broken). The same search
