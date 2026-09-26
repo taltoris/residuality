@@ -27,7 +27,11 @@ from snapshot  import (ensure_collection as ensure_snapshot_collection,
                        store_snapshot, search_snapshots,
                        format_snapshot_for_context)
 from context   import ContextBuilder
-from owui_client import OWUIClient
+from owui_client import (
+    OWUIClient, load_config, save_config, config_path, apply_model_config,
+    resolve_model, list_models, strip_think, strip_code_fence,
+    DEFAULT_EDIT_PROMPT, CONFIG_FILENAME,
+)
 from graph import (render_file_graph, render_file_detail, render_directory_graph,
                     load_graph, get_node_by_id, get_neighbors, export_prose)
 
@@ -48,8 +52,31 @@ REPOS_PATH   = os.getenv("REPOS_PATH", "/repos")
 RES_USERNAME = os.getenv("RESIDUALITY_USERNAME", "admin")
 RES_PASSWORD = os.getenv("RESIDUALITY_PASSWORD", "changeme")
 
+# How much of an edit's line range is sent to the model. A local model's context
+# is the binding constraint here, and "whole file" on a 900-line file is what
+# actually breaks it; a node range is normally far under this.
+MAX_EDIT_NODE_CHARS = int(os.getenv("MAX_EDIT_NODE_CHARS", "6000"))
+
 ctx_builder = ContextBuilder()
 owui        = OWUIClient()
+
+
+def reload_model_config() -> dict:
+    """Re-read settings from disk and push them onto the live client.
+
+    `model_cfg` is module state and the routes read it through `resolve_model`,
+    so saving has to refresh it — otherwise a running process keeps serving
+    whatever was on disk when it started.
+    """
+    global model_cfg
+    model_cfg = load_config()
+    apply_model_config(owui, model_cfg)
+    return model_cfg
+
+
+# Settings from the config file (.env underneath) applied at import, not in
+# `__main__`, so they also take effect when the app is served by something else.
+model_cfg = reload_model_config()
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -169,7 +196,60 @@ def index_commit_async(repo: ArtifactRepo, commit_hash: str,
 @login_required
 def projects():
     return render_template("projects.html", projects=list_projects(),
-                           repos_path=REPOS_PATH)
+                           repos_path=REPOS_PATH,
+                           **settings_context())
+
+
+# ── Global settings (homepage panel) ──────────────────────────────────────
+
+def settings_context() -> dict:
+    """Template context for the settings panel on the homepage.
+
+    The model list is deliberately *not* fetched here. This is the homepage,
+    and a slow or unreachable OWUI would otherwise stall every page load — the
+    panel fills its datalists from /api/models once the page is up, and shows
+    the saved value as the current selection either way.
+    """
+    cfg = load_config()
+    return {
+        "model_cfg":           cfg,
+        "resolved_chat":       resolve_model(cfg, "chat"),
+        "resolved_edit":       resolve_model(cfg, "edit"),
+        "api_key_set":         bool(cfg.get("owui_api_key")),
+        "config_file":         str(config_path()),
+        "edit_prompt_default": DEFAULT_EDIT_PROMPT,
+    }
+
+
+@app.route("/settings/models", methods=["POST"])
+@login_required
+def settings_models():
+    """Save the global model / connection / prompt settings.
+
+    Blank means two different things, deliberately: for the model slots, the
+    URL and the prompt it clears the override so the .env value applies again;
+    for the API key it means "leave the stored key alone", because the field is
+    rendered masked and is never echoed back to the browser.
+    """
+    cfg = load_config()
+
+    for field in ("default", "chat", "edit", "planner", "summarizer",
+                  "edit_prompt", "owui_url"):
+        if field in request.form:
+            cfg[field] = request.form.get(field, "").strip()
+
+    if request.form.get("owui_api_key", "").strip():
+        cfg["owui_api_key"] = request.form["owui_api_key"].strip()
+
+    try:
+        save_config(cfg)
+    except Exception as e:
+        flash(f"Could not write {CONFIG_FILENAME}: {e}", "error")
+        return redirect(url_for("projects"))
+
+    reload_model_config()
+    flash("Settings saved", "success")
+    return redirect(url_for("projects"))
 
 
 @app.route("/projects/new", methods=["GET", "POST"])
@@ -413,7 +493,7 @@ def chat_send(project_id: str):
     )
 
     try:
-        response = owui.chat(messages)
+        response = owui.chat(messages, model=owui.CHAT_MODEL)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -838,12 +918,20 @@ def graph_edit(project_id: str):
         file_path=node["file"],
         line_start=node["line_start"],
         line_end=node["line_end"],
+        system_prompt=model_cfg.get("edit_prompt"),
     )
 
     try:
-        new_content = owui.chat(messages)
+        new_content = owui.chat(messages, model=owui.EDIT_MODEL)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+    # Cleaned up the same way the modal's AI edit is, and for a stronger reason:
+    # this path commits as soon as the model answers, so a fenced reply would put
+    # literal backticks into the file *and* into history, past the point where a
+    # diff can undo it.
+    new_content, _ = strip_think(new_content)
+    new_content, _ = strip_code_fence(new_content)
 
     edit = {"line_start": node["line_start"], "line_end": node["line_end"], "new_content": new_content}
     commit_msg = f"Edit {node_id}: {instruction[:80]}"
@@ -854,6 +942,208 @@ def graph_edit(project_id: str):
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"commit_hash": commit_hash[:8], "new_content": new_content})
+
+
+@app.route("/projects/<project_id>/graph/save_lines", methods=["POST"])
+@login_required
+def save_lines(project_id: str):
+    """Replace one line range of the working file with the editor's lines.
+
+    This is the "sed" step, done in-process. Shelling out to `sed -i` would
+    mean escaping the replacement text for `&`, `/`, backslash and newline (and
+    a multi-line `c\\` replacement) — all to produce bytes identical to what a
+    slice assignment already produces.
+
+    Deliberately does **not** commit. The file and the graph.dot section
+    rebuilt from it are left dirty in the working tree, so the edit arrives in
+    Regenerate & Commit for review like any other working-tree change.
+
+    `node_id` is optional and only used to hand the caller back the node's line
+    range *after* the edit: adding or removing lines shifts the span, and a
+    stale range would make the next save target the wrong lines.
+    """
+    repo     = get_repo(project_id)
+    filepath = request.form.get("file", "").strip().strip("/")
+    node_id  = request.form.get("node_id", "").strip() or None
+
+    if not filepath:
+        return jsonify({"error": "No file given"}), 400
+
+    try:
+        line_start = int(request.form.get("line_start", "0"))
+        line_end   = int(request.form.get("line_end", "0"))
+    except ValueError:
+        return jsonify({"error": "line_start/line_end must be integers"}), 400
+    if line_start < 1 or line_end < line_start:
+        return jsonify({"error": f"Bad line range {line_start}-{line_end}"}), 400
+
+    full_path = repo.repo_path / filepath
+    if not full_path.is_file():
+        return jsonify({"error": f"{filepath} is not a file in the working tree"}), 404
+
+    try:
+        original = full_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    lines = original.splitlines()
+
+    # Bounds check. `apply_edits` trusts line_start/line_end, and a graph built
+    # before the last edit to this file hands out a range that no longer
+    # exists -- slicing past the end would silently drop the file's tail.
+    if line_start > len(lines):
+        return jsonify({"error": (
+            f"Range starts at line {line_start} but {filepath} has "
+            f"{len(lines)} lines - the graph is stale, rebuild it"
+        )}), 409
+    clamped = line_end > len(lines)
+    eff_end = min(line_end, len(lines))
+
+    new_lines = request.form.get("content", "").splitlines()
+    updated   = lines[:line_start - 1] + new_lines + lines[eff_end:]
+
+    # A trailing newline *terminates* the last line rather than starting an
+    # empty one, so don't invent one for a file that had none, and don't drop
+    # the one that was there.
+    full_path.write_text("\n".join(updated) + ("\n" if original.endswith("\n") else ""),
+                         encoding="utf-8")
+
+    # Re-run Build Graph for this one file: rewrite only its section of
+    # graph.dot, leaving every other file's block untouched. Files no parser
+    # handles (Dockerfile, LICENSE, requirements.txt) have no section to
+    # rebuild -- the content is saved either way.
+    errors = []
+    parsed = bool(repo._lang_key(filepath)) or filepath.lower().endswith(".md")
+    if parsed:
+        try:
+            repo._update_graph(filepath)
+        except Exception as e:
+            logger.error(f"graph rebuild failed for {filepath}: {e}", exc_info=True)
+            errors.append(f"graph rebuild: {type(e).__name__}: {e}")
+
+    # Hand back the node's new span, read straight off the rebuilt graph.
+    new_start = line_start
+    new_end   = line_start + len(new_lines) - 1
+    if node_id and parsed and not errors:
+        graph = load_graph(str(repo.repo_path / ".residuality" / "graph.dot"))
+        node  = get_node_by_id(graph, node_id) if graph else None
+        if node and node.get("file") == filepath and node.get("line_start"):
+            new_start, new_end = node["line_start"], node["line_end"]
+
+    return jsonify({
+        "status":     "ok",
+        "file":       filepath,
+        "line_start": new_start,
+        "line_end":   new_end,
+        "lines":      len(new_lines),
+        "graph":      parsed,
+        "clamped":    clamped,
+        "errors":     errors,
+    })
+
+
+@app.route("/projects/<project_id>/graph/ai_edit", methods=["POST"])
+@login_required
+def graph_ai_edit(project_id: str):
+    """Ask a model for a replacement for one line range, returned as text.
+
+    Deliberately stops at text. Nothing is written, nothing is committed and
+    graph.dot is not rebuilt: the reply lands in the editor's box, where the
+    user sees it as a diff against the original and either saves it through
+    `save_lines` or cancels it away. So this endpoint needs none of the
+    bounds-clamping or graph-rebuild half of `save_lines` — it touches no file.
+
+    The model is checked against the endpoint's own list rather than taken on
+    trust. That list is whatever the configured API key can see, so the
+    allowlist is a property of the key rather than a second thing to maintain.
+    """
+    repo        = get_repo(project_id)
+    filepath    = request.form.get("file", "").strip().strip("/")
+    node_id     = request.form.get("node_id", "").strip() or None
+    instruction = request.form.get("instruction", "").strip()
+    model       = (request.form.get("model", "").strip()
+                   or resolve_model(model_cfg, "edit"))
+
+    if not filepath:
+        return jsonify({"error": "No file given"}), 400
+    if not instruction:
+        return jsonify({"error": "Describe what should change first"}), 400
+
+    try:
+        line_start = int(request.form.get("line_start", "0"))
+        line_end   = int(request.form.get("line_end", "0"))
+    except ValueError:
+        return jsonify({"error": "line_start/line_end must be integers"}), 400
+    if line_start < 1 or line_end < line_start:
+        return jsonify({"error": f"Bad line range {line_start}-{line_end}"}), 400
+
+    full_path = repo.repo_path / filepath
+    if not full_path.is_file():
+        return jsonify({"error": f"{filepath} is not a file in the working tree"}), 404
+
+    lines = full_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if line_start > len(lines):
+        return jsonify({"error": (
+            f"Range starts at line {line_start} but {filepath} has "
+            f"{len(lines)} lines - the graph is stale, rebuild it"
+        )}), 409
+    content = "\n".join(lines[line_start - 1:min(line_end, len(lines))])
+
+    truncated = len(content) > MAX_EDIT_NODE_CHARS
+    if truncated:
+        # Head-kept: a definition's signature and shape are at the top, and the
+        # tail of a long range is usually it recursing into more of the same.
+        # Reported back so the UI can say the model saw less than what is on
+        # screen rather than quietly answering about a fragment.
+        content = content[:MAX_EDIT_NODE_CHARS]
+
+    known, list_error = list_models(base_url=owui.base_url, api_key=owui.api_key)
+    if known:
+        if model not in {m["id"] for m in known}:
+            return jsonify({
+                "error":  f"Model '{model}' is not offered by {owui.base_url} "
+                          f"with the configured API key",
+                "models": [m["id"] for m in known],
+            }), 400
+    else:
+        # Nothing to validate against, so accept only a model this install is
+        # already configured to use rather than any id the browser names.
+        allowed = {v for v in (model_cfg.get("default"), model_cfg.get("chat"),
+                               resolve_model(model_cfg, "edit")) if v}
+        if model not in allowed:
+            return jsonify({"error": (
+                f"Cannot verify model '{model}': the model list is "
+                f"unavailable ({list_error or 'empty'})"
+            )}), 503
+
+    messages = ctx_builder.build_edit_context(
+        node_content=content,
+        node_id=node_id or filepath,
+        instruction=instruction,
+        rolling_summary=_conversation_state.get(project_id, {}).get("summary"),
+        file_path=filepath,
+        line_start=line_start,
+        line_end=min(line_end, len(lines)),
+        system_prompt=model_cfg.get("edit_prompt"),
+    )
+
+    try:
+        reply = owui.chat(messages, model=model)
+    except Exception as e:
+        logger.error(f"ai_edit call failed: {e}", exc_info=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
+    text, think_stripped = strip_think(reply)
+    text, fences_stripped = strip_code_fence(text)
+    return jsonify({
+        "content":        text,
+        "model":          model,
+        "think_stripped": think_stripped,
+        "fences_stripped": fences_stripped,
+        "truncated":      truncated,
+        "line_start":     line_start,
+        "line_end":       line_end,
+    })
 
 # ── Merge ─────────────────────────────────────────────────────────────────
 
@@ -1163,7 +1453,61 @@ def api_dag(project_id: str):
 def api_health():
     return jsonify({"status": "ok", "owui": owui.health_check()})
 
+@app.route("/api/models")
+@login_required
+def api_models():
+    """Proxy the endpoint's model list, with the current selections.
+
+    This route used to sit *below* `if __name__ == "__main__": app.run(...)`,
+    which never returns — so under the Docker entrypoint (`python app.py`) it
+    was never registered at all, and it called `requests.get` in a module that
+    never imported `requests`. The move and the single fetcher fix both.
+    """
+    models, error = list_models(
+        base_url=owui.base_url,
+        api_key=owui.api_key,
+        force=request.args.get("refresh") == "1",
+    )
+    return jsonify({
+        "models":             models,
+        "error":              error,
+        "endpoint":           owui.base_url,
+        "current_default":    model_cfg.get("default", ""),
+        "current_chat":       model_cfg.get("chat", ""),
+        "current_edit":       model_cfg.get("edit", ""),
+        "resolved_chat":      resolve_model(model_cfg, "chat"),
+        "resolved_edit":      resolve_model(model_cfg, "edit"),
+        "current_planner":    resolve_model(model_cfg, "planner"),
+        "current_summarizer": resolve_model(model_cfg, "summarizer"),
+    })
+
+
+@app.route("/api/models/select", methods=["POST"])
+@login_required  
+def api_models_select():
+    """Save model selections. Superseded by /settings/models.
+
+    Kept because it predates the settings panel; both now write through the
+    same `save_config`, so there is one config file and one rule rather than
+    two. Note it used to write `chat_model` into the *default* slot and then
+    copy every value onto the client, where `chat()` ignored it anyway.
+    """
+    cfg = load_config()
+    for field in ("default", "chat", "edit", "planner", "summarizer"):
+        if field in request.form:
+            cfg[field] = request.form.get(field, "").strip()
+    try:
+        save_config(cfg)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    reload_model_config()
+    return jsonify({"status": "ok"})
+
+
 # ── Startup ───────────────────────────────────────────────────────────────
+# Last in the file on purpose: `app.run()` blocks, so everything above has to
+# be registered before this point. Routes used to be defined *after* it, which
+# meant they silently did not exist in the deployed app.
 
 if __name__ == "__main__":
     ensure_collections()
@@ -1171,56 +1515,3 @@ if __name__ == "__main__":
     port = int(os.getenv("RESIDUALITY_PORT", 5010))
     logger.info(f"Residuality starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
-
-@app.route("/api/models")
-@login_required
-def api_models():
-    """Proxy OWUI model list."""
-    try:
-        r = requests.get(
-            f"{owui.base_url}/api/models",
-            headers=owui.headers,
-            timeout=10,
-        )
-        data = r.json()
-        models = [
-            {"id": m["id"], "name": m.get("name", m["id"])}
-            for m in data.get("data", [])
-            if not m.get("arena")  # skip arena model
-        ]
-        return jsonify({
-            "models":          models,
-            "current_chat":    owui.DEFAULT_MODEL,
-            "current_planner": owui.PLANNER_MODEL,
-            "current_summarizer": owui.SUMMARIZER_MODEL,
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/models/select", methods=["POST"])
-@login_required  
-def api_models_select():
-    """Update active model selections — persisted to config file."""
-    import configparser
-    
-    chat_model      = request.form.get("chat_model",      "").strip()
-    planner_model   = request.form.get("planner_model",   "").strip()
-    summarizer_model = request.form.get("summarizer_model", "").strip()
-
-    # Write to a config file that persists across restarts
-    config_path = Path(REPOS_PATH).parent / "residuality_models.cfg"
-    cfg = configparser.ConfigParser()
-    cfg["models"] = {}
-    if chat_model:       cfg["models"]["chat"]       = chat_model
-    if planner_model:    cfg["models"]["planner"]     = planner_model
-    if summarizer_model: cfg["models"]["summarizer"]  = summarizer_model
-    with open(config_path, "w") as f:
-        cfg.write(f)
-
-    # Update in-memory client
-    if chat_model:       owui.DEFAULT_MODEL    = chat_model
-    if planner_model:    owui.PLANNER_MODEL    = planner_model
-    if summarizer_model: owui.SUMMARIZER_MODEL = summarizer_model
-
-    return jsonify({"status": "ok"})

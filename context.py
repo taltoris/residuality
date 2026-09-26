@@ -107,11 +107,20 @@ class ContextBuilder:
         file_path: Optional[str] = None,
         line_start: Optional[int] = None,
         line_end: Optional[int] = None,
+        system_prompt: Optional[str] = None,
     ) -> list:
-        """Build context for a surgical node edit."""
+        """Build context for a surgical node edit.
+
+        `system_prompt` is the editable half — it is a setting, because how a
+        given model wants to be asked for bare replacement text differs. The
+        fallback is the same string that was hardcoded here, so an install
+        that never touches the setting sends what it always did.
+        """
         system_parts = [
-            "You are editing a specific section of code or prose. "
-            "Return ONLY the replacement content, no explanations, no markdown fences."
+            system_prompt or (
+                "You are editing a specific section of code or prose. "
+                "Return ONLY the replacement content, no explanations, no markdown fences."
+            )
         ]
 
         if rolling_summary:

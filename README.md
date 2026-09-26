@@ -105,6 +105,10 @@ Required env (defaults in parentheses):
 **Change the defaults before exposing this to a network.** There is no rate limiting
 and the default credentials are committed in `docker-compose.yml`.
 
+The three model variables above are *defaults*. Anything set in the homepage settings
+panel is written to `residuality_models.cfg` and takes precedence over the environment —
+see [Model settings](#model-settings).
+
 ---
 
 ## Usage
@@ -124,14 +128,102 @@ and the default credentials are committed in `docker-compose.yml`.
    readable end to end. Click a file in the SVG to see its classes and functions; click a
    node to view its exact source span and its neighbours (`contains`, `calls`, `imports`,
    `precedes`).
-4. **Edit a node** — pick a function or section, give an instruction, and the model
-   returns *only* the replacement text for that line range. Applied bottom-up so ranges
-   don't shift, then committed.
+4. **Edit a node** — pick a function or section and either type the new lines yourself
+   or press **AI** and describe the change, letting a model draft the replacement.
+   Either way the result is a draft in the box, shown as a diff against the original;
+   Save splices the range and leaves it dirty for Regenerate & Commit.
 5. **Chat** — mention something historical (`when did`, `broke`, `changed`) to pull in
    relevant commits and snapshots; mention structure (`function`, `class`, `where is`)
    to pull in graph nodes. The current node's content is injected as ground truth.
 6. **Merge** — select two commits and let the model reconcile divergent files into a
    two-parent merge commit.
+
+### Hand-editing a node, or a whole file
+
+The graph's node pop-up reads a node's exact line span, so the same pane edits it.
+Opening a file lands on the **whole file** — the node list is on the left to narrow
+into, not a gate in front of it — and a pill in the header names the file and the
+range on screen (`file.py (whole file)`, then `file.py :: section` once one is
+picked). **Edit** turns the source view into a text box holding *that line range
+and nothing else*. The box is the final draft: `show changes` renders it as a
+git-style diff against the original (additions green, deletions red and struck
+through, a changed line as a deletion with its replacement beneath it, every
+untouched line left in place), and unchecking it drops the rendering back to the
+plain final draft. It is on by default and available only in edit mode, and the
+diff collapses on save — once the file has taken the edit there is nothing left to
+compare against. While editing, the range being edited sits on the left of the
+footer and Save/Cancel on the right.
+
+**Save** splices the box's lines over that range in the working file and re-runs
+Build Graph for that one file, so only its `// --- file: ... ---` block of
+graph.dot is rewritten. It deliberately does **not** commit: the file and graph.dot
+are left dirty for Regenerate & Commit, which is also where the message comes from.
+A file no parser handles (Dockerfile, LICENSE, requirements.txt) still saves, and
+reports `graph unchanged`. **Cancel** reverts the node to its original state, and
+navigating out of the pane with unsaved text asks first.
+
+The "sed" step is a Python slice assignment rather than `sed -i`: the replacement
+text is arbitrary, so escaping `&`, `/`, backslash and newline (and a multi-line
+`c\` range) buys nothing a slice does not already do. A range that no longer
+exists — a graph built before the last edit to the file — is refused rather than
+silently truncating the file, and an over-long range end is clamped and reported.
+
+### Asking a model to rewrite a node
+
+**AI**, in the node pop-up, opens a small panel: which model, and what should change.
+Submitting sends *the lines on screen* — the same range **Edit** would open — and drops
+the reply into that editor box. From there it is an ordinary edit: the diff comes up
+already on, Save splices it, Cancel drops it. The endpoint writes nothing and commits
+nothing, so the diff *is* the review step; there is no second write path to get wrong.
+
+The reply is cleaned up in exactly two ways, because there are exactly two shapes
+where what the model said is unambiguous:
+
+- **A `…` reasoning trace is removed.** A reasoning model emits one whatever the
+  prompt says. An *unclosed* trace is the awkward case — there is no way to tell where
+  the reasoning stops and the answer starts — so only the tag is dropped there.
+- **A markdown fence around the whole reply is unwrapped.** The reported case was a
+  full-file rewrite coming back as ```` ```python …file… ``` ````, which would otherwise
+  paste backticks through the entire file.
+
+Both keep the text when they cannot tell, on the same principle: discarding model
+output behind an approve-before-write box is worse than showing some noise. So a fence
+with prose *around* it is deliberately left alone — for a prose target the answer can
+legitimately be a sentence with a code block inside it (`Use this:\n```sh\nmake\n```
+),
+and nothing in the text distinguishes that from a fenced-off answer. Guessing would drop
+the sentence. The diff is where that gets decided, and both flags come back with the
+reply so the status line can say which cleanup happened.
+
+Everything past that is the prompt's job, which is why it is a setting. An empty reply
+is refused outright rather than opening an empty box over a live range, where Save would
+quietly delete it.
+
+The older node page has its own edit path (`graph_edit`) which asks a model and then
+**commits**. It gets the same two cleanups and the same configured prompt, because a
+fenced reply there would reach history, past the point a diff can undo.
+
+### Model settings
+
+The homepage settings panel covers: the shared **default** model, separate **chat** and
+**edit** overrides, the endpoint URL, the API key, and the prompt and system prompt used
+for edits. Precedence is per-call model → slot override → default → environment, and an
+empty override means *follow the default* rather than *unset*.
+
+Settings are saved to `residuality_models.cfg`, beside the projects and inside the
+`/repos` mount so they survive a container recreate, and they layer *over* the
+environment: an install that never opens the panel runs entirely off `.env`, and
+clearing a field hands it back. The file is `0600` because it can hold an API key, and a
+blank key field means *keep the stored one* — the value is never sent back to the
+browser. The model list is filled in by JavaScript after the page renders, so a slow or
+dead endpoint delays a dropdown rather than the homepage, and an unreachable one leaves
+the saved value in a datalist you can still type into.
+
+**The allowlist is the API key.** `/api/models` returns whatever the configured key can
+see, cached for 30s, and an edit naming a model the key cannot reach is refused before
+anything is sent. When the list cannot be fetched at all, only the already-configured
+models are accepted — an arbitrary id from the browser is not, and the picker keeps its
+last good list rather than emptying.
 
 ### Prose marker syntax
 
@@ -203,6 +295,22 @@ Two sharp edges worth keeping in mind when adding anything here:
   summary and the last 20 exchanges in-memory; everything else (commits, nodes,
   snapshots) comes back from Qdrant on every message. Restart the server and you lose
   the working summary, not the history.
+- **Settings layer over the environment, never replace it.** `load_config` starts from
+  `.env` and applies the config file on top, so a key deleted from the file falls back
+  to its environment value instead of becoming empty. The alternative — writing the
+  merged result and treating the file as authoritative — makes `.env` silently stop
+  mattering the first time someone opens the panel.
+- **`/api/models` is fetched in one place.** It used to be duplicated, once inside
+  `OWUIClient` and once inline in a route, with the inline copy calling `requests.get`
+  in a module that never imported `requests`.
+- **Routes belong above the startup block.** `if __name__ == "__main__": app.run(...)`
+  never returns, so anything defined after it is never registered under the Docker
+  entrypoint (`python app.py`). `/api/models` and `/api/models/select` sat below it and
+  therefore did not exist in the deployed app at all.
+- **`chat()` takes its model as an argument, not a default.** `def chat(...,
+  model=DEFAULT_MODEL)` binds at import, so setting `client.DEFAULT_MODEL` changed the
+  attribute and nothing about what was sent — which is why the old model-select endpoint
+  appeared to do nothing.
 
 ### Known limitations
 
@@ -217,6 +325,10 @@ Two sharp edges worth keeping in mind when adding anything here:
   that comes from `git ls-files` rather than `graph.dot`. Bundles just under the
   limit are indexed, and their minified single-letter names then collide into
   duplicate node ids.
+- `graph_edit` (`/projects/<id>/graph/node/<node_id>`, the `graph_node.html` page) is the
+  older path: it asks a model, then **commits immediately** with a generated message.
+  The modal's Edit/AI flow deliberately does not use it, so the two behave differently
+  for the same node — one lands in Regenerate & Commit, the other is already in history.
 
 ---
 

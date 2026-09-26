@@ -32,7 +32,10 @@
 #node-modal { display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:999;align-items:center;justify-content:center;padding:1rem; }
 #node-modal .shell { background:#161b22;border:0.5px solid #30363d;border-radius:12px;width:min(920px,96vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden; }
 #node-modal header { display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid #30363d; }
-#node-modal header .file { font-family:monospace;font-size:13px;color:#58a6ff; }
+/* The file and the range currently on screen, as one pill on the left. */
+#node-modal header .ctx-pill { display:none;align-items:center;gap:6px;padding:3px 10px;border:0.5px solid #30363d;border-radius:12px;background:#0d1117;max-width:62%;overflow:hidden; }
+#node-modal header .ctx-pill .file { font-family:monospace;font-size:12px;color:#58a6ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+#node-modal header .ctx-pill #modal-node { font-family:monospace;font-size:11px;color:#8b949e;white-space:nowrap; }
 #node-modal header button { background:none;border:none;cursor:pointer;font-size:13px;padding:3px 8px;border-radius:4px;color:#8b949e;font-family:inherit; }
 #node-modal header button:hover { background:#21262d;color:#c9d1d9; }
 #node-modal .body { display:flex;flex:1;overflow:hidden; }
@@ -52,6 +55,33 @@
 #node-modal .lines { font-size:10px;color:#8b949e;font-family:monospace; }
 #node-modal pre { margin:0;background:transparent;border:none;font-size:11px;line-height:1.5;color:#c9d1d9;white-space:pre; }
 #node-modal .empty { color:#8b949e;font-size:12px;padding:1rem;text-align:center; }
+/* Editing. "show changes" lives in the header beside Edit; Save/Cancel are the
+   footer. The status line sits on the left and the buttons on the right, and it
+   outlives edit mode, so a save's result stays readable after the diff has
+   collapsed. */
+#node-modal header label { display:none;align-items:center;gap:5px;font-size:13px;color:#8b949e;cursor:pointer;padding:3px 8px;border-radius:4px; }
+#node-modal header label:hover { background:#21262d;color:#c9d1d9; }
+#node-modal header input[type=checkbox] { width:auto;margin:0;cursor:pointer;accent-color:#1f6feb; }
+#node-modal header button:disabled { opacity:.4;cursor:default;background:none;color:#8b949e; }
+#node-modal .editor { width:100%;min-height:260px;margin:0;padding:8px;background:#0d1117;color:#c9d1d9;border:0.5px solid #30363d;border-radius:6px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre;overflow:auto;resize:vertical; }
+#node-modal .diffview { margin-top:8px;padding:8px;background:#0d1117;border:0.5px solid #30363d;border-radius:6px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre;overflow:auto; }
+#node-modal .diffview .dl { display:block; }
+#node-modal .diffview .ln { display:inline-block;width:3.4em;padding-right:.5em;text-align:right;color:#484f58;user-select:none; }
+#node-modal .diffview .mk { display:inline-block;width:1.1em;user-select:none; }
+#node-modal .diffview .add { color:#3fb950;background:#12261a; }
+#node-modal .diffview .del { color:#f85149;background:#2e1a1a;text-decoration:line-through; }
+#node-modal footer { display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:0.5px solid #30363d; }
+#node-modal footer .hint { flex:1;min-width:0;font-size:11px;line-height:1.4;color:#8b949e;text-align:left; }
+/* The AI popover: text in, text out. It asks for a rewrite of the lines on
+   screen and drops the reply into the editor box, so it hangs off the header
+   rather than taking a pane of its own. */
+#node-modal .shell { position:relative; }
+#node-modal .ai-pop { display:none;position:absolute;top:46px;right:14px;z-index:6;width:min(430px,86%);background:#161b22;border:0.5px solid #30363d;border-radius:10px;padding:10px;box-shadow:0 10px 30px rgba(0,0,0,0.55); }
+#node-modal .ai-pop .ai-lab { font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:#8b949e;margin-bottom:2px; }
+#node-modal .ai-pop input { font-size:12px;margin-bottom:6px; }
+#node-modal .ai-pop textarea { min-height:58px;font-family:'Courier New',monospace;font-size:12px;margin-bottom:0;resize:vertical; }
+#node-modal .ai-pop .ai-row { display:flex;align-items:center;gap:6px;margin-top:8px; }
+#node-modal .ai-pop .ai-hint { flex:1;min-width:0;font-size:11px;line-height:1.3;color:#8b949e; }
 .file-row { display:flex; align-items:center; gap:0.5rem; padding:0.3rem 0; border-bottom:1px solid #21262d; font-size:0.85rem; }
 .file-row:last-child { border-bottom:none; }
 .file-status { font-size:0.75rem; padding:0.1rem 0.4rem; border-radius:10px; min-width:2rem; text-align:center; }
@@ -130,21 +160,43 @@
 <div id="node-modal">
     <div class="shell">
         <header>
-            <div>
-                <div class="file" id="modal-file"></div>
-                <span id="modal-node" style="font-size:11px;color:#8b949e;font-family:monospace;"></span>
+            <div class="ctx-pill" id="modal-ctx">
+                <span class="file" id="modal-file"></span>
+                <span id="modal-node"></span>
             </div>
             <div style="display:flex;align-items:center;gap:4px;">
                 <button id="modal-fullfile" title="Show the whole file">whole file</button>
                 <button id="modal-expand" title="Show file detail graph">&#9881;</button>
-                <button id="modal-back" title="Back to node list" style="display:none;">&#8592; back</button>
+                <label id="modal-showchanges-wrap" title="Render the box as a git-style diff of the original">
+                    <input type="checkbox" id="modal-showchanges"> show changes
+                </label>
+                <button id="modal-ai" title="Ask a model to rewrite these lines">AI</button>
+                <button id="modal-edit" title="Edit these lines">Edit</button>
                 <button id="modal-close" title="Close">&times;</button>
             </div>
         </header>
+        <div class="ai-pop" id="modal-ai-pop">
+            <div class="ai-lab">Model</div>
+            <input id="modal-ai-model" list="modal-ai-models" placeholder="loading models…">
+            <datalist id="modal-ai-models"></datalist>
+            <div class="ai-lab">What should change?</div>
+            <textarea id="modal-ai-prompt" rows="3" spellcheck="false"
+                      placeholder="e.g. make the null check handle empty strings"></textarea>
+            <div class="ai-row">
+                <span class="ai-hint" id="modal-ai-status"></span>
+                <button class="btn" id="modal-ai-cancel">Cancel</button>
+                <button class="btn btn-primary" id="modal-ai-go">Ask</button>
+            </div>
+        </div>
         <div class="body">
             <div class="nodes" id="modal-nodes"></div>
-            <div class="source" id="modal-source"><div class="empty">Select a node to view its source.</div></div>
+            <div class="source" id="modal-source"><div class="empty">Loading file...</div></div>
         </div>
+        <footer id="modal-footer" style="display:none;">
+            <span class="hint" id="modal-edit-status"></span>
+            <button class="btn" id="modal-cancel" style="display:none;">Cancel</button>
+            <button class="btn btn-primary" id="modal-save" style="display:none;">Save</button>
+        </footer>
     </div>
 </div>
 <div id="plan-output"></div>
@@ -730,11 +782,13 @@
 
     function openNodeModal(filepath, preselectNodeId) {
         document.getElementById('node-modal').style.display = 'flex';
-        document.getElementById('modal-back').style.display = 'none';
-        document.getElementById('modal-file').textContent = filepath;
-        document.getElementById('modal-node').textContent = '';
+        setModalContext(filepath, '');
         document.getElementById('modal-source').innerHTML = '<div class="empty">Loading...</div>';
         modalState = { file: filepath, nodes: [], pane: NODE_PANE };
+        sourceState = { file: null, nodeId: null, lineStart: 1, lineEnd: 0,
+                        content: '', ready: false };
+        setEditStatus('');
+        updateEditChrome();
         modalNonce++;
         var n = modalNonce;
         document.getElementById('modal-nodes').innerHTML =
@@ -751,14 +805,17 @@
                 }
                 modalState.nodes = data.nodes;
                 renderNodesPane();
-                // Clicking an interior node in the detail graph jumps
-                // straight to that node's source.
-                if (preselectNodeId) {
-                    var idx = modalState.nodes.findIndex(function(x) {
-                        return x.id === preselectNodeId;
-                    });
-                    if (idx >= 0) selectNode(idx);
-                }
+                // Clicking a node in the detail graph jumps straight to that
+                // node's source.
+                var idx = preselectNodeId
+                    ? modalState.nodes.findIndex(function(x) {
+                          return x.id === preselectNodeId;
+                      })
+                    : -1;
+                // Otherwise open on the file as a whole. The node list is a way
+                // to narrow into the file, not a gate in front of it.
+                if (idx >= 0) selectNode(idx);
+                else          showFullFile(filepath);
             })
             .catch(function(e) {
                 if (n !== modalNonce) return;
@@ -770,10 +827,9 @@
     function renderNodesPane() {
         var div = document.getElementById('modal-nodes');
         if (!modalState.nodes.length) {
-            // Unparsed file (Dockerfile, LICENSE, requirements.txt): no
-            // interior nodes to list, so drop straight to the file's source.
+            // Unparsed file (Dockerfile, LICENSE, requirements.txt): no interior
+            // nodes to list; the source itself is all there is to show.
             div.innerHTML = '<div class="empty">No interior nodes - showing file source.</div>';
-            showFullFile(modalState.file);
             return;
         }
         div.innerHTML = modalState.nodes.map(function(n, i) {
@@ -791,60 +847,485 @@
                 selectNode(parseInt(this.dataset.i));
             });
         });
-        // openNodeModal parks "Loading..." in the source pane and nothing else
-        // cleared it, so a file with nodes sat on that placeholder until a node
-        // was clicked.
-        document.getElementById('modal-source').innerHTML =
-            '<div class="empty">Select a node to view its source.</div>';
+        // The caller picks what the pane shows -- a preselected node, or the
+        // file as a whole. This only fills the list.
+    }
+
+    // ── Source pane: read view, edit view, live diff ────────
+    // One pane serves both "this node/section" and "the whole file" -- the
+    // only difference is the range a save splices over (1..N for the whole
+    // file), so everything below is range-agnostic.
+    var sourceState = { file: null, nodeId: null, lineStart: 1, lineEnd: 0,
+                        content: '', ready: false };
+    var editState   = null;   // {file, nodeId, lineStart, lineEnd, original}
+    var diffTimer   = null;
+
+    function sourcePane() { return document.getElementById('modal-source'); }
+
+    // 'graph.html::Class::method' reads as 'Class::method' once the file name is
+    // already sitting beside it in the pill.
+    function shortNodeLabel(id, file) {
+        if (!id) return '';
+        var p = file + '::';
+        return id.indexOf(p) === 0 ? id.slice(p.length) : id;
+    }
+
+    // The file and the range currently on screen, as one pill on the left. It
+    // stays up for the whole file and then for whatever node is selected.
+    function setModalContext(file, label) {
+        document.getElementById('modal-file').textContent = file || '';
+        document.getElementById('modal-node').textContent = label || '';
+        document.getElementById('modal-ctx').style.display = file ? 'inline-flex' : 'none';
+    }
+
+    function renderSource(content, file, nodeId, lineStart, lineEnd) {
+        sourceState = { file: file, nodeId: nodeId || null,
+                        lineStart: lineStart, lineEnd: lineEnd,
+                        content: content, ready: true };
+        var pane = sourcePane();
+        pane.innerHTML = '';
+        var pre = document.createElement('pre');
+        pre.textContent = content;
+        pane.appendChild(pre);
+        updateEditChrome();
+    }
+
+    function renderSourceError(msg) {
+        sourceState = { file: null, nodeId: null, lineStart: 1, lineEnd: 0,
+                        content: '', ready: false };
+        sourcePane().innerHTML = '<div class="empty">Error: '+esc(msg)+'</div>';
+        updateEditChrome();
+    }
+
+    // Edit and "show changes" only mean something once a range is on screen,
+    // and the checkbox is a way to *look* at an edit, not a way into editing:
+    // it exists in edit mode and nowhere else.
+    function updateEditChrome() {
+        document.getElementById('modal-edit').disabled = !sourceState.ready || !!editState;
+        // The AI button produces the text edit mode holds, so it only means
+        // something with a range on screen and no edit already open.
+        document.getElementById('modal-ai').disabled = !aiAvailable();
+        if (!aiAvailable()) closeAiPopover();
+        document.getElementById('modal-showchanges-wrap').style.display =
+            editState ? 'inline-flex' : 'none';
+        ['modal-save', 'modal-cancel'].forEach(function(id) {
+            document.getElementById(id).style.display =
+                editState ? 'inline-block' : 'none';
+        });
+        if (!editState) document.getElementById('modal-showchanges').checked = false;
+        syncFooter();
+    }
+
+    // The footer carries Save/Cancel and the one status line. With neither on
+    // show it would just be a stray divider under the source pane.
+    function syncFooter() {
+        var msg = document.getElementById('modal-edit-status').textContent;
+        document.getElementById('modal-footer').style.display =
+            (editState || msg) ? 'flex' : 'none';
+    }
+
+    // Mirrors the indexer's line count: a trailing newline terminates the last
+    // line rather than starting an empty one, so "a\nb\n" is two lines.
+    function lineCount(text) {
+        return text ? text.replace(/\n$/, '').split('\n').length : 0;
+    }
+
+    function setEditStatus(msg, color) {
+        var el = document.getElementById('modal-edit-status');
+        el.textContent = msg || '';
+        el.style.color = color || '#8b949e';
+        syncFooter();
     }
 
     function selectNode(i) {
         var n = modalState.nodes[i];
         if (!n) return;
+        if (!leaveEditGuard()) return;
+        var file = modalState.file;
         var div = document.getElementById('modal-nodes');
         div.querySelectorAll('.node-item').forEach(function(el, idx) {
             el.classList.toggle('sel', idx === i);
         });
-        document.getElementById('modal-node').textContent = n.id;
-        document.getElementById('modal-back').style.display = 'inline-block';
+        setModalContext(file, '::' + shortNodeLabel(n.id, file));
         modalState.pane = SOURCE_PANE;
+        document.getElementById('modal-edit').disabled = true;
         document.getElementById('modal-source').innerHTML = '<div class="empty">Loading source...</div>';
         fetch('/projects/'+PID+'/graph/node_content/'+encodeURIComponent(n.id))
             .then(function(r){ return r.json(); })
             .then(function(data) {
-                var pre = document.createElement('pre');
-                pre.textContent = data.content || data.error || '(empty)';
-                document.getElementById('modal-source').innerHTML = '';
-                document.getElementById('modal-source').appendChild(pre);
+                if (data.error) { renderSourceError(data.error); return; }
+                renderSource(data.content || '', file, n.id,
+                             data.line_start, data.line_end);
             })
-            .catch(function(e) {
-                document.getElementById('modal-source').innerHTML =
-                    '<div class="empty">Error: '+esc(e.message)+'</div>';
-            });
+            .catch(function(e) { renderSourceError(e.message); });
     }
 
     function showFullFile(filepath) {
-        var pane = document.getElementById('modal-source');
-        document.getElementById('modal-back').style.display = 'none';
-        document.getElementById('modal-node').textContent = '(whole file)';
+        if (!leaveEditGuard()) return;
+        var pane = sourcePane();
+        setModalContext(filepath, '(whole file)');
         modalState.pane = SOURCE_PANE;
+        document.getElementById('modal-edit').disabled = true;
         pane.innerHTML = '<div class="empty">Loading source...</div>';
         fetch('/projects/'+PID+'/graph/file_content/'+encodeURIComponent(filepath))
             .then(function(r){ return r.json(); })
             .then(function(data) {
-                var pre = document.createElement('pre');
-                pre.textContent = data.content || data.error || '(empty)';
-                pane.innerHTML = '';
-                pane.appendChild(pre);
+                if (data.error) { renderSourceError(data.error); return; }
+                var text = data.content || '';
+                renderSource(text, filepath, null, 1, lineCount(text));
+            })
+            .catch(function(e) { renderSourceError(e.message); });
+    }
+
+    // ── Editing ─────────────────────────────────────────
+
+    // `seedText` is how the AI button hands over its reply: it opens the box
+    // with the model's text already in it, which the diff then renders against
+    // the original. Nothing else about edit mode changes -- the file is not
+    // touched until Save, so the diff is the review step.
+    function enterEditMode(seedText) {
+        if (editState || !sourceState.ready) return;
+        editState = {
+            file:      sourceState.file,
+            nodeId:    sourceState.nodeId,
+            lineStart: sourceState.lineStart,
+            lineEnd:   sourceState.lineEnd,
+            original:  sourceState.content
+        };
+        var pane = sourcePane();
+        pane.innerHTML = '';
+
+        // The box holds the *final draft* -- exactly the text the file will
+        // get. "show changes" is a rendering of it against the original, never
+        // a second copy of the truth to keep in sync.
+        var ta = document.createElement('textarea');
+        ta.id         = 'modal-editor';
+        ta.className  = 'editor';
+        ta.spellcheck = false;
+        ta.value      = (typeof seedText === 'string') ? seedText : editState.original;
+        ta.addEventListener('input', function() {
+            clearTimeout(diffTimer);
+            diffTimer = setTimeout(renderDiff, 120);
+        });
+        pane.appendChild(ta);
+
+        var dv = document.createElement('div');
+        dv.id              = 'modal-diff';
+        dv.className       = 'diffview';
+        dv.style.display   = 'none';
+        pane.appendChild(dv);
+
+        // Diffing is the point of edit mode, so it comes up already on. The
+        // editing line below is a description of the range, not the toggle's
+        // label, so it stays put while the box is checked and unchecked.
+        document.getElementById('modal-showchanges').checked = true;
+        setEditStatus('editing ' +
+                      (editState.nodeId || (editState.file + ' (whole file)')) +
+                      ', lines ' + editState.lineStart + '-' + editState.lineEnd +
+                      ' of ' + editState.file, '#8b949e');
+        updateEditChrome();
+        renderDiff();
+        ta.focus();
+    }
+
+    function exitEditMode() {
+        if (!editState) return;
+        clearTimeout(diffTimer);
+        editState = null;
+        updateEditChrome();
+    }
+
+    // Every way out of the pane goes through here: unsaved text is the one
+    // thing this modal can lose.
+    function leaveEditGuard() {
+        if (!editState) return true;
+        var ta = document.getElementById('modal-editor');
+        if (ta && ta.value !== editState.original &&
+            !confirm('Discard unsaved edits to '+
+                     (editState.nodeId || editState.file) + '?')) {
+            return false;
+        }
+        exitEditMode();
+        return true;
+    }
+
+    function cancelEdit() {
+        if (!editState) return;
+        var st = editState;
+        exitEditMode();
+        // Cancel reverts the node/section to its original state: the box goes
+        // away and the read view comes back holding the original lines.
+        renderSource(st.original, st.file, st.nodeId, st.lineStart, st.lineEnd);
+        setEditStatus('reverted ' + (st.nodeId || st.file) + ' to its original state',
+                      '#8b949e');
+    }
+
+    function splitLines(text) {
+        return text.length ? text.replace(/\n$/, '').split('\n') : [];
+    }
+
+    // LCS row walk -- the shape a git diff has. A line that changed has no
+    // match to align to, so it comes out as a deletion with an insertion
+    // beneath it, which is exactly the requested rule.
+    function diffRows(a, b) {
+        var rows = [], i;
+
+        // Trim the common prefix and suffix first: the table is O(n*m), and the
+        // untouched head and tail of a 900-line file would otherwise be built
+        // and discarded on every keystroke.
+        var p = 0;
+        while (p < a.length && p < b.length && a[p] === b[p]) p++;
+        var s = 0;
+        while (s < a.length - p && s < b.length - p &&
+               a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+        var midA = a.slice(p, a.length - s);
+        var midB = b.slice(p, b.length - s);
+
+        for (i = 0; i < p; i++) rows.push({t:'ctx', text:a[i], o:i + 1, n:i + 1});
+
+        var ops = [];
+        if (midA.length * midB.length > 4000000) {
+            // Pathological middle (the whole file replaced): report the block
+            // rather than stall the keystroke building the table.
+            midA.forEach(function(l){ ops.push(['del', l]); });
+            midB.forEach(function(l){ ops.push(['add', l]); });
+        } else {
+            var W = midB.length + 1;
+            var t = new Int32Array((midA.length + 1) * W);
+            var x, y;
+            for (x = midA.length - 1; x >= 0; x--) {
+                for (y = midB.length - 1; y >= 0; y--) {
+                    t[x*W + y] = midA[x] === midB[y]
+                        ? t[(x + 1)*W + y + 1] + 1
+                        : Math.max(t[(x + 1)*W + y], t[x*W + y + 1]);
+                }
+            }
+            x = 0; y = 0;
+            while (x < midA.length && y < midB.length) {
+                if (midA[x] === midB[y]) { ops.push(['ctx', midA[x]]); x++; y++; }
+                else if (t[(x + 1)*W + y] >= t[x*W + y + 1]) {
+                    ops.push(['del', midA[x]]); x++;
+                } else {
+                    ops.push(['add', midB[y]]); y++;
+                }
+            }
+            while (x < midA.length) ops.push(['del', midA[x++]]);
+            while (y < midB.length) ops.push(['add', midB[y++]]);
+        }
+
+        var o = p + 1, nn = p + 1;
+        ops.forEach(function(op) {
+            if (op[0] === 'ctx')      rows.push({t:'ctx', text:op[1], o:o++, n:nn++});
+            else if (op[0] === 'del') rows.push({t:'del', text:op[1], o:o++, n:null});
+            else                      rows.push({t:'add', text:op[1], o:null, n:nn++});
+        });
+        for (i = 0; i < s; i++) {
+            var idx = a.length - s + i;
+            rows.push({t:'ctx', text:a[idx], o:idx + 1, n:idx + 1});
+        }
+        return rows;
+    }
+
+    // The whole document stays on screen -- context above and below the change,
+    // like a diff with no hunks collapsed.
+    function renderDiff() {
+        var box = document.getElementById('modal-diff');
+        var ta  = document.getElementById('modal-editor');
+        if (!box || !ta || !editState) return;
+        if (!document.getElementById('modal-showchanges').checked) {
+            box.style.display = 'none';
+            box.textContent   = '';
+            return;
+        }
+        var rows = diffRows(splitLines(editState.original), splitLines(ta.value));
+        var frag = document.createDocumentFragment();
+        rows.forEach(function(r) {
+            var line = document.createElement('span');
+            line.className = 'dl' + (r.t === 'add' ? ' add' : r.t === 'del' ? ' del' : '');
+            var num = document.createElement('span');
+            num.className   = 'ln';
+            num.textContent = (r.o != null ? r.o : r.n);
+            var mark = document.createElement('span');
+            mark.className   = 'mk';
+            mark.textContent = r.t === 'add' ? '+' : r.t === 'del' ? '-' : ' ';
+            var text = document.createElement('span');
+            text.textContent = r.text;
+            line.appendChild(num); line.appendChild(mark); line.appendChild(text);
+            frag.appendChild(line);
+        });
+        box.textContent = '';
+        box.appendChild(frag);
+        box.style.display = 'block';
+    }
+
+    function saveEdit() {
+        if (!editState) return;
+        var ta  = document.getElementById('modal-editor');
+        var txt = ta ? ta.value : '';
+        var st  = editState;
+        document.getElementById('modal-save').disabled   = true;
+        document.getElementById('modal-cancel').disabled = true;
+        setEditStatus('splicing the lines in and rebuilding this file\'s graph...',
+                      '#8b949e');
+
+        var fd = new FormData();
+        fd.append('file',       st.file);
+        if (st.nodeId) fd.append('node_id', st.nodeId);
+        fd.append('line_start', st.lineStart);
+        fd.append('line_end',   st.lineEnd);
+        fd.append('content',    txt);
+
+        fetch('/projects/'+PID+'/graph/save_lines', {method:'POST', body:fd})
+            .then(function(r) {
+                return r.json().then(function(d){ return {ok:r.ok, d:d}; });
+            })
+            .then(function(res) {
+                document.getElementById('modal-save').disabled   = false;
+                document.getElementById('modal-cancel').disabled = false;
+                var d = res.d || {};
+                if (!res.ok || d.error) {
+                    setEditStatus('save failed: '+(d.error || 'unknown error'), '#f85149');
+                    return;
+                }
+                // The diff compares against the *original*; once the file has
+                // taken the edit there is nothing left to compare to, so the
+                // rendering collapses and the pane returns to the read view.
+                exitEditMode();
+                renderSource(txt, st.file, st.nodeId, d.line_start, d.line_end);
+                var msg = 'saved lines '+d.line_start+'-'+d.line_end+' of '+st.file+
+                          (d.graph ? ' - graph rebuilt (reload to redraw)'
+                                   : ' - no parser for this file, graph unchanged');
+                if (d.clamped) msg += ' (range clamped to the end of the file)';
+                if (d.errors && d.errors.length) msg += ' - '+d.errors.join('; ');
+                setEditStatus(msg + ' - uncommitted, commit from Regenerate & Commit',
+                              (d.errors && d.errors.length) ? '#d29922' : '#3fb950');
             })
             .catch(function(e) {
-                pane.innerHTML = '<div class="empty">Error: '+esc(e.message)+'</div>';
+                document.getElementById('modal-save').disabled   = false;
+                document.getElementById('modal-cancel').disabled = false;
+                setEditStatus('save failed: '+e, '#f85149');
+            });
+    }
+
+    // ── AI edit ────────────────────────────────────────
+    // Produces text and nothing else. No file is written and nothing is
+    // committed, so there is no save path here to get wrong -- the reply goes
+    // into the editor box and Save is what touches the file.
+    var aiModelsLoaded = false;
+
+    function aiPopover() { return document.getElementById('modal-ai-pop'); }
+
+    function aiAvailable() { return sourceState.ready && !editState; }
+
+    function closeAiPopover() {
+        aiPopover().style.display = 'none';
+    }
+
+    function setAiStatus(msg, color) {
+        var el = document.getElementById('modal-ai-status');
+        el.textContent = msg || '';
+        el.style.color = color || '#8b949e';
+    }
+
+    function openAiPopover() {
+        if (!aiAvailable()) return;
+        aiPopover().style.display = 'block';
+        document.getElementById('modal-ai-prompt').focus();
+        loadAiModels();
+    }
+
+    // Fill the dropdown from the endpoint once per page. The saved edit model
+    // is the preselected value, so the usual case is "type and go"; if the
+    // list cannot be fetched the saved value stays in the box and the server
+    // is what refuses an unverifiable model.
+    function loadAiModels() {
+        if (aiModelsLoaded) return;
+        var input = document.getElementById('modal-ai-model');
+        fetch('/api/models')
+            .then(function(r){ return r.json(); })
+            .then(function(d) {
+                var models = d.models || [];
+                document.getElementById('modal-ai-models').innerHTML =
+                    models.map(function(m) {
+                        return '<option value="'+esc(m.id)+'" label="'+esc(m.name)+'"></option>';
+                    }).join('');
+                if (!input.value) input.value = d.resolved_edit || d.current_default || '';
+                aiModelsLoaded = true;
+                setAiStatus(models.length
+                        ? models.length + ' models at ' + (d.endpoint || 'the endpoint')
+                        : 'no models returned' + (d.error ? ' (' + d.error + ')' : ''),
+                    models.length ? '#8b949e' : '#d29922');
+            })
+            .catch(function(e) { setAiStatus('could not load models: ' + e, '#f85149'); });
+    }
+
+    function askAi() {
+        if (!aiAvailable()) return;
+        var box = document.getElementById('modal-ai-prompt');
+        var txt = box.value.trim();
+        if (!txt) {
+            setAiStatus('describe what should change first', '#d29922');
+            box.focus();
+            return;
+        }
+        var model = document.getElementById('modal-ai-model').value.trim();
+        var st    = sourceState;          // snapshot: the fetch outlives a re-render
+        var go    = document.getElementById('modal-ai-go');
+        go.disabled = true;
+        setAiStatus('asking ' + (model || 'the model') + '…', '#8b949e');
+
+        var fd = new FormData();
+        fd.append('file',        st.file);
+        if (st.nodeId) fd.append('node_id', st.nodeId);
+        fd.append('line_start',  st.lineStart);
+        fd.append('line_end',    st.lineEnd);
+        fd.append('instruction', txt);
+        if (model) fd.append('model', model);
+
+        fetch('/projects/'+PID+'/graph/ai_edit', {method:'POST', body:fd})
+            .then(function(r) {
+                return r.json().then(function(d){ return {ok:r.ok, d:d}; });
+            })
+            .then(function(res) {
+                go.disabled = false;
+                var d = res.d || {};
+                if (!res.ok || d.error) {
+                    setAiStatus(d.error || 'the request failed', '#f85149');
+                    return;
+                }
+                // An empty reply would open an empty box over a live range,
+                // and Save would then delete the range. Refuse it instead.
+                if (!d.content) {
+                    setAiStatus('the model returned nothing usable — not opening an edit',
+                                '#d29922');
+                    return;
+                }
+                closeAiPopover();
+                enterEditMode(d.content);
+                var note = 'accepted a rewrite of lines ' + st.lineStart + '\u2013' + st.lineEnd +
+                           ' from ' + (d.model || 'the model');
+                if (d.think_stripped)  note += ', thinking trace stripped';
+                if (d.fences_stripped) note += ', code fence removed';
+                if (d.truncated)       note += ', the range was too long to send in full';
+                setEditStatus(note + ' — review the diff, then Save or Cancel', '#8b949e');
+            })
+            .catch(function(e) {
+                go.disabled = false;
+                setAiStatus('request failed: ' + e, '#f85149');
             });
     }
 
     function closeNodeModal() {
+        if (!leaveEditGuard()) return;
+        closeAiPopover();
+        document.getElementById('modal-ai-prompt').value = '';   // blank next time
         document.getElementById('node-modal').style.display = 'none';
-        modalState = { file: null, nodes: [], pane: NODE_PANE };
+        modalState  = { file: null, nodes: [], pane: NODE_PANE };
+        sourceState = { file: null, nodeId: null, lineStart: 1, lineEnd: 0,
+                        content: '', ready: false };
+        setModalContext('', '');
+        setEditStatus('');
+        updateEditChrome();
     }
 
     // A file with interior nodes used to offer no way to see the file as a
@@ -853,19 +1334,41 @@
         if (modalState.file) showFullFile(modalState.file);
     });
     document.getElementById('modal-close').addEventListener('click', closeNodeModal);
-    document.getElementById('modal-back').addEventListener('click', function() {
-        modalState.pane = NODE_PANE;
-        document.getElementById('modal-back').style.display = 'none';
-        document.getElementById('modal-node').textContent = '';
-        document.getElementById('modal-source').innerHTML = '<div class="empty">Select a node to view its source.</div>';
-    });
     document.getElementById('modal-expand').addEventListener('click', function() {
         var f = modalState.file;   // closeNodeModal() clears modalState
+        if (!leaveEditGuard()) return;
         closeNodeModal();
         if (f) drillDown(f);
     });
     document.getElementById('node-modal').addEventListener('click', function(e) {
         if (e.target === this) closeNodeModal();
+    });
+
+    // ── Edit / show changes / save / cancel ─────────────────
+    // Wrapped rather than passed directly: a click event would otherwise
+    // arrive as enterEditMode's `seedText`.
+    document.getElementById('modal-edit').addEventListener('click', function() {
+        enterEditMode();
+    });
+    document.getElementById('modal-save').addEventListener('click', saveEdit);
+    document.getElementById('modal-cancel').addEventListener('click', cancelEdit);
+    // Toggling only changes the rendering: checked shows the diff against the
+    // original, unchecked leaves the final draft. The editing line on the left
+    // is not touched, since it describes the range rather than the toggle.
+    document.getElementById('modal-showchanges').addEventListener('change', renderDiff);
+
+    // ── AI popover wiring ──────────────────────────────────
+    document.getElementById('modal-ai').addEventListener('click', function() {
+        if (aiPopover().style.display === 'block') closeAiPopover();
+        else                                       openAiPopover();
+    });
+    document.getElementById('modal-ai-go').addEventListener('click', askAi);
+    document.getElementById('modal-ai-cancel').addEventListener('click', closeAiPopover);
+    // Enter sends, Shift+Enter is a newline: the box is a one-shot instruction,
+    // not a document.
+    document.getElementById('modal-ai-prompt').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); askAi(); }
+        else if (e.key === 'Escape')          { e.preventDefault(); closeAiPopover(); }
     });
 
     document.getElementById('toggle-external-btn').addEventListener('click', function() {

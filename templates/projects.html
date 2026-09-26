@@ -6,6 +6,94 @@
     <a href="{{ url_for('new_project') }}" class="btn btn-primary">+ New Project</a>
 </div>
 
+{# The summary line carries the current selection, so the settings can be read
+   without expanding the panel. #}
+<details class="card" style="padding:0;">
+    <summary style="cursor:pointer;padding:0.75rem 1rem;font-size:0.9rem;color:#8b949e;">
+        ⚙ AI settings —
+        <span style="color:#58a6ff;font-family:monospace;">default: {{ model_cfg.get('default','') }}</span>
+        {% if resolved_edit != model_cfg.get('default','') %}
+            <span style="color:#8b949e;">· edit: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_edit }}</span>
+        {% endif %}
+        {% if resolved_chat != model_cfg.get('default','') %}
+            <span style="color:#8b949e;">· chat: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_chat }}</span>
+        {% endif %}
+    </summary>
+
+    <form method="POST" action="{{ url_for('settings_models') }}" style="padding:0 1rem 1rem;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;">
+            <div>
+                <label for="s-default">Default model <span style="color:#484f58;">(chat + edits)</span></label>
+                <input id="s-default" name="default" list="model-ids"
+                       value="{{ model_cfg.get('default','') }}" placeholder="model id">
+            </div>
+            <div>
+                <label for="s-chat">Chat override</label>
+                <input id="s-chat" name="chat" list="model-ids"
+                       value="{{ model_cfg.get('chat','') }}" placeholder="blank = follow default">
+            </div>
+            <div>
+                <label for="s-edit">Edit override</label>
+                <input id="s-edit" name="edit" list="model-ids"
+                       value="{{ model_cfg.get('edit','') }}" placeholder="blank = follow default">
+            </div>
+            <div>
+                <label for="s-url">Endpoint <span style="color:#484f58;">(OpenAI-compatible)</span></label>
+                <input id="s-url" name="owui_url"
+                       value="{{ model_cfg.get('owui_url','') }}" placeholder="http://host:8282">
+            </div>
+            <div>
+                <label for="s-key">API key</label>
+                <input id="s-key" name="owui_api_key" type="password" value=""
+                       autocomplete="new-password"
+                       placeholder="{{ '•••••• stored — blank keeps it' if api_key_set else 'not set' }}">
+            </div>
+        </div>
+
+        <div style="margin-top:0.75rem;">
+            <label for="s-prompt">Prompt for AI edits</label>
+            <textarea id="s-prompt" name="edit_prompt" rows="3" spellcheck="false">{{ model_cfg.get('edit_prompt','') }}</textarea>
+            <p style="font-size:0.75rem;color:#8b949e;">
+                Sent as the system prompt. The lines on screen and your description go in the user
+                message, so this only has to say what shape the answer should come back in.
+                <a href="#" id="s-prompt-reset" data-default="{{ edit_prompt_default }}"
+                   style="color:#58a6ff;">reset to default</a>
+            </p>
+        </div>
+
+        <details style="margin-top:0.5rem;">
+            <summary style="cursor:pointer;font-size:0.8rem;color:#8b949e;">Advanced roles</summary>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;margin-top:0.5rem;">
+                <div>
+                    <label for="s-planner">Planner model</label>
+                    <input id="s-planner" name="planner" list="model-ids"
+                           value="{{ model_cfg.get('planner','') }}">
+                </div>
+                <div>
+                    <label for="s-summarizer">Summarizer model <span style="color:#484f58;">(commits, summaries)</span></label>
+                    <input id="s-summarizer" name="summarizer" list="model-ids"
+                           value="{{ model_cfg.get('summarizer','') }}">
+                </div>
+            </div>
+        </details>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;">
+            <button class="btn btn-primary" type="submit">Save settings</button>
+            <button class="btn" type="button" id="s-reload">Reload models</button>
+            <span id="s-model-status" style="font-size:0.75rem;color:#8b949e;"></span>
+        </div>
+
+        <datalist id="model-ids"></datalist>
+
+        <p style="font-size:0.75rem;color:#8b949e;margin-top:0.5rem;">
+            Saved to <code>{{ config_file }}</code>. These values override <code>.env</code>,
+            so blanking a field hands it back to the environment. The model list is whatever
+            the configured API key can see — that is also what an edit is checked against
+            before it is sent.
+        </p>
+    </form>
+</details>
+
 {% if projects %}
 <div class="card">
     <table>
@@ -53,4 +141,49 @@
     or place an existing git repo in <code>/repos/</code>.
 </div>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// The model list comes from the endpoint after the page renders, so rendering
+// the homepage never blocks on OWUI and a dead endpoint leaves the saved value
+// in the field with an explanation instead of an empty dropdown. The inputs are
+// datalists, so a typed id is still possible when the list cannot be fetched.
+(function() {
+    var status = document.getElementById('s-model-status');
+
+    function load(force) {
+        status.textContent = 'loading models…';
+        status.style.color = '#8b949e';
+        fetch('/api/models' + (force ? '?refresh=1' : ''))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var models = d.models || [];
+                document.getElementById('model-ids').innerHTML = models.map(function(m) {
+                    return '<option value="' + m.id + '" label="' +
+                           (m.name || m.id) + '"></option>';
+                }).join('');
+                if (d.error) {
+                    status.textContent = 'models unavailable — ' + d.error;
+                    status.style.color = '#d29922';
+                } else {
+                    status.textContent = models.length + ' models at ' + d.endpoint;
+                    status.style.color = '#8b949e';
+                }
+            })
+            .catch(function(e) {
+                status.textContent = 'could not reach the app: ' + e;
+                status.style.color = '#f85149';
+            });
+    }
+
+    document.getElementById('s-reload').addEventListener('click', function() { load(true); });
+    document.getElementById('s-prompt-reset').addEventListener('click', function(e) {
+        e.preventDefault();
+        document.getElementById('s-prompt').value = this.dataset.default;
+    });
+
+    load(false);
+})();
+</script>
 {% endblock %}

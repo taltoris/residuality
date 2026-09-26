@@ -122,7 +122,26 @@ def index_commit(commit_data: dict) -> bool:
 
 
 def index_graph_node(node_data: dict) -> bool:
-    """Index a graph node in the project's graph collection."""
+    """Index a graph node in the project's Qdrant graph collection.
+
+    Embeds the node's signature/label and docstring into a dense vector,
+    then upserts the point into the project-scoped graph collection.
+
+    Args:
+        node_data: Dictionary containing node metadata. Expected keys:
+            - project_id: Project identifier (defaults to "default").
+            - id: Unique node identifier.
+            - signature: Function/method signature (preferred for embedding).
+            - label: Human-readable label (fallback for embedding).
+            - docstring: Documentation string (appended to embedding text).
+            - type: Node type (e.g., "function", "class").
+            - file: Source file path.
+            - line_start: Starting line number.
+            - line_end: Ending line number.
+
+    Returns:
+        True if the point was successfully upserted, False otherwise.
+    """
     project_id = node_data.get("project_id", "default")
     text = (node_data.get("signature") or node_data.get("label")
             or node_data.get("id", ""))

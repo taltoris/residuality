@@ -69,7 +69,7 @@ def _node_color(node_type: str) -> tuple:
 
 class _DotNode:
     """Stand-in for a pydot node: a name and an attribute dict.
-
+    #This is an example change
     Names and attribute values keep their surrounding quotes, exactly as pydot
     reports them, so every existing .strip('"') call site is unaffected.
     """
