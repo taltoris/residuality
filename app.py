@@ -29,11 +29,12 @@ from snapshot  import (ensure_collection as ensure_snapshot_collection,
 from context   import ContextBuilder
 from owui_client import (
     OWUIClient, load_config, save_config, config_path, apply_model_config,
-    resolve_model, list_models, strip_think, strip_code_fence,
-    DEFAULT_EDIT_PROMPT, CONFIG_FILENAME,
+    resolve_model, resolve_max_edit_chars, list_models, strip_think, strip_code_fence,
+    plan_edit_chunks, DEFAULT_EDIT_PROMPT, CONFIG_FILENAME, CONTEXT_TOKENS,
 )
 from graph import (render_file_graph, render_file_detail, render_directory_graph,
-                    load_graph, get_node_by_id, get_neighbors, export_prose)
+                    load_graph, get_node_by_id, get_neighbors, graph_node_ranges,
+                    export_prose)
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -52,10 +53,10 @@ REPOS_PATH   = os.getenv("REPOS_PATH", "/repos")
 RES_USERNAME = os.getenv("RESIDUALITY_USERNAME", "admin")
 RES_PASSWORD = os.getenv("RESIDUALITY_PASSWORD", "changeme")
 
-# How much of an edit's line range is sent to the model. A local model's context
-# is the binding constraint here, and "whole file" on a 900-line file is what
-# actually breaks it; a node range is normally far under this.
-MAX_EDIT_NODE_CHARS = int(os.getenv("MAX_EDIT_NODE_CHARS", "6000"))
+# The per-edit send limit lives with the rest of the model settings now
+# (owui_client), derived from the configured context window rather than pinned
+# to a constant, so it can be changed from the settings panel without a
+# redeploy. Read it through resolve_max_edit_chars().
 
 ctx_builder = ContextBuilder()
 owui        = OWUIClient()
@@ -218,6 +219,8 @@ def settings_context() -> dict:
         "api_key_set":         bool(cfg.get("owui_api_key")),
         "config_file":         str(config_path()),
         "edit_prompt_default": DEFAULT_EDIT_PROMPT,
+        "context_tokens_default": CONTEXT_TOKENS,
+        "resolved_max_edit_chars": resolve_max_edit_chars(cfg),
     }
 
 
@@ -237,6 +240,19 @@ def settings_models():
                   "edit_prompt", "owui_url"):
         if field in request.form:
             cfg[field] = request.form.get(field, "").strip()
+
+    # Numeric settings are kept as text so blank can still mean "fall back to
+    # .env"; only a non-number is refused, because a silently-ignored typo here
+    # reads as "the setting does nothing".
+    for field, label in (("context_tokens", "Context window"),
+                         ("max_edit_chars", "Max characters per edit")):
+        if field in request.form:
+            raw = request.form.get(field, "").strip()
+            if raw and not raw.isdigit():
+                flash(f"{label} must be a whole number, or blank to use .env",
+                      "error")
+                return redirect(url_for("projects"))
+            cfg[field] = raw
 
     if request.form.get("owui_api_key", "").strip():
         cfg["owui_api_key"] = request.form["owui_api_key"].strip()
@@ -1056,6 +1072,12 @@ def graph_ai_edit(project_id: str):
     The model is checked against the endpoint's own list rather than taken on
     trust. That list is whatever the configured API key can see, so the
     allowlist is a property of the key rather than a second thing to maintain.
+
+    A range larger than the model's budget is split on the graph's node
+    boundaries and sent as one call per chunk, then stitched back into a single
+    replacement. That is the index doing what it exists for: a small-context
+    model can still rewrite a whole file, one node at a time, without the range
+    ever being cut down to a prefix it never saw the end of.
     """
     repo        = get_repo(project_id)
     filepath    = request.form.get("file", "").strip().strip("/")
@@ -1088,28 +1110,18 @@ def graph_ai_edit(project_id: str):
             f"{len(lines)} lines - the graph is stale, rebuild it"
         )}), 409
     line_end = min(line_end, len(lines))
-    selected = lines[line_start - 1:line_end]
 
-    # Head-kept, and cut on a *line* boundary: half a line would be spliced back
-    # in where a whole one was. The head is the half worth keeping, because a
-    # definition's signature and shape are at the top.
-    #
-    # `shown_end` is what the reply actually covers, and it is what the caller
-    # splices over. An answer to a prefix is not an answer to the whole range;
-    # treating it as one is how a long range silently loses its tail.
-    shown_end = line_end
-    if len("\n".join(selected)) > MAX_EDIT_NODE_CHARS:
-        budget, kept = MAX_EDIT_NODE_CHARS, 0
-        for i, line in enumerate(selected):
-            need = len(line) + (1 if i else 0)      # + the newline that joins it
-            if need > budget:
-                break
-            budget -= need
-            kept = i + 1
-        kept      = max(kept, 1)                    # never send an empty range
-        shown_end = line_start + kept - 1
-    content   = "\n".join(selected[:shown_end - line_start + 1])
-    truncated = shown_end < line_end
+    # Split the range on the graph's own node boundaries and send one call per
+    # chunk. A node begins and ends at a statement, so a cut there keeps whole
+    # functions; the old head-clamp cut on an arbitrary line and spliced a
+    # prefix answer back over the whole range, which is how a long range lost
+    # its tail. Chunking is the index doing what it exists for -- a small model
+    # edits a big file node by node.
+    dot_path    = str(repo.repo_path / ".residuality" / "graph.dot")
+    graph       = load_graph(dot_path)
+    node_ranges = graph_node_ranges(graph, filepath)
+    limit       = resolve_max_edit_chars(model_cfg)
+    chunks      = plan_edit_chunks(lines, line_start, line_end, limit, node_ranges)
 
     known, list_error = list_models(base_url=owui.base_url, api_key=owui.api_key)
     if known:
@@ -1130,35 +1142,67 @@ def graph_ai_edit(project_id: str):
                 f"unavailable ({list_error or 'empty'})"
             )}), 503
 
-    messages = ctx_builder.build_edit_context(
-        node_content=content,
-        node_id=node_id or filepath,
-        instruction=instruction,
-        rolling_summary=_conversation_state.get(project_id, {}).get("summary"),
-        file_path=filepath,
-        line_start=line_start,
-        line_end=shown_end,
-        requested_line_end=line_end if truncated else None,
-        system_prompt=model_cfg.get("edit_prompt"),
-    )
+    summary  = _conversation_state.get(project_id, {}).get("summary")
+    many     = len(chunks) > 1
+    replies  = []
+    empty    = []
+    think_stripped  = False
+    fences_stripped = False
 
-    try:
-        reply = owui.chat(messages, model=model)
-    except Exception as e:
-        logger.error(f"ai_edit call failed: {e}", exc_info=True)
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+    for index, (chunk_start, chunk_end) in enumerate(chunks, start=1):
+        messages = ctx_builder.build_edit_context(
+            node_content="\n".join(lines[chunk_start - 1:chunk_end]),
+            node_id=node_id or filepath,
+            instruction=instruction,
+            rolling_summary=summary,
+            file_path=filepath,
+            line_start=chunk_start,
+            line_end=chunk_end,
+            chunk=(index, len(chunks), line_start, line_end) if many else None,
+            system_prompt=model_cfg.get("edit_prompt"),
+        )
+        try:
+            reply = owui.chat(messages, model=model)
+        except Exception as e:
+            # Any chunk failing fails the whole edit: a stitched answer with a
+            # hole in it is the silent damage this path exists to avoid. The
+            # chunk is named so a retry is not blind.
+            logger.error(
+                f"ai_edit chunk {index}/{len(chunks)} "
+                f"({chunk_start}-{chunk_end}) failed: {e}", exc_info=True,
+            )
+            return jsonify({"error": (
+                f"chunk {index} of {len(chunks)} "
+                f"(lines {chunk_start}-{chunk_end}) failed: "
+                f"{type(e).__name__}: {e}"
+            )}), 502
 
-    text, think_stripped = strip_think(reply)
-    text, fences_stripped = strip_code_fence(text)
+        text, think_stripped_chunk  = strip_think(reply)
+        text, fences_stripped_chunk = strip_code_fence(text)
+        think_stripped  = think_stripped or think_stripped_chunk
+        fences_stripped = fences_stripped or fences_stripped_chunk
+
+        if text.strip():
+            replies.append(text)
+        else:
+            # An empty answer would splice a hole where those lines were, so the
+            # chunk is kept verbatim and reported. Discarding model output is not
+            # this endpoint's call to make.
+            empty.append({"line_start": chunk_start, "line_end": chunk_end})
+            replies.append("\n".join(lines[chunk_start - 1:chunk_end]))
+
+    if len(empty) == len(chunks):
+        return jsonify({"error": "the model returned nothing usable"}), 502
+
     return jsonify({
-        "content":        text,
-        "model":          model,
-        "think_stripped": think_stripped,
+        "content":         "\n".join(replies),
+        "model":           model,
+        "think_stripped":  think_stripped,
         "fences_stripped": fences_stripped,
-        "truncated":      truncated,
-        "line_start":     line_start,
-        "line_end":       shown_end,
-        "requested_end":  line_end,
+        "chunk_count":     len(chunks),
+        "empty_chunks":    empty,
+        "line_start":      line_start,
+        "line_end":        line_end,
     })
 
 # ── Merge ─────────────────────────────────────────────────────────────────

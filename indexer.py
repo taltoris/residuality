@@ -1,6 +1,15 @@
 """
 indexer.py — Qdrant indexer for Residuality
-Per-project collections: res_{project_id}_commits, res_{project_id}_graph
+
+Provides per-project vector collections for commit messages and code graph nodes.
+Collections are named `res_{project_id}_commits` and `res_{project_id}_graph`
+and are created lazily on first write.
+
+Public API:
+    - index_commit(commit_data: dict) -> bool
+    - index_graph_node(node_data: dict) -> bool
+    - search_commits(query: str, project_id: str, limit: int) -> list[dict]
+    - search_graph_nodes(query: str, project_id: str, limit: int) -> list[dict]
 """
 
 import os
@@ -11,20 +20,38 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Configuration
 QDRANT_URL        = os.getenv("QDRANT_URL",  "http://192.168.0.100:6333")
 EMBED_URL         = os.getenv("EMBED_URL",   "http://192.168.0.100:8090")
 COLLECTION_PREFIX = os.getenv("QDRANT_COLLECTION_PREFIX", "res")
 VECTOR_DIM        = 768
 
 
+# ---------------------------------------------------------------------------
+# Collection name helpers
+# ---------------------------------------------------------------------------
+
 def commits_collection(project_id: str) -> str:
+    """Return the Qdrant collection name for commit vectors of a project."""
     return f"{COLLECTION_PREFIX}_{project_id}_commits"
 
+
 def graph_collection(project_id: str) -> str:
+    """Return the Qdrant collection name for graph node vectors of a project."""
     return f"{COLLECTION_PREFIX}_{project_id}_graph"
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
 def _embed(text: str) -> Optional[list]:
+    """
+    Generate a dense embedding vector for the given text.
+
+    Truncates input to 2048 characters before sending to the embedding service.
+    Returns None on failure (network error, bad response, etc.).
+    """
     try:
         r = requests.post(
             f"{EMBED_URL}/v1/embeddings",
@@ -39,6 +66,12 @@ def _embed(text: str) -> Optional[list]:
 
 
 def _ensure_collection(name: str) -> None:
+    """
+    Ensure the named Qdrant collection exists, creating it if necessary.
+
+    Uses a Cosine distance metric with dense vectors of size VECTOR_DIM.
+    Failures are logged but not raised.
+    """
     try:
         r = requests.get(f"{QDRANT_URL}/collections/{name}", timeout=10)
         if r.status_code == 404:
@@ -54,6 +87,12 @@ def _ensure_collection(name: str) -> None:
 
 
 def _qdrant_put(collection: str, points: list) -> bool:
+    """
+    Upsert one or more points into the specified collection.
+
+    Ensures the collection exists before writing.
+    Returns True on HTTP 200, False otherwise.
+    """
     _ensure_collection(collection)
     try:
         r = requests.put(
@@ -70,6 +109,12 @@ def _qdrant_put(collection: str, points: list) -> bool:
 
 def _qdrant_search(collection: str, vector: list,
                    limit: int = 10) -> list:
+    """
+    Perform a vector similarity search in the specified collection.
+
+    Returns the raw list of result objects from Qdrant, or an empty list
+    on failure.
+    """
     try:
         r = requests.post(
             f"{QDRANT_URL}/collections/{collection}/points/search",
@@ -84,13 +129,38 @@ def _qdrant_search(collection: str, vector: list,
         return []
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def ensure_collections() -> None:
-    """No-op — collections are created lazily per project."""
+    """
+    No-op. Collections are created lazily per project on first write.
+    Retained for backward compatibility.
+    """
     pass
 
 
 def index_commit(commit_data: dict) -> bool:
-    """Index a commit message in the project's commits collection."""
+    """
+    Index a commit message in the project's commits collection.
+
+    Args:
+        commit_data: Dictionary with keys:
+            - project_id: Project identifier (defaults to "default").
+            - message: Commit message text (required).
+            - commit_hash: Unique commit identifier.
+            - branch: Branch name (defaults to "main").
+            - parent_hashes: List of parent commit hashes.
+            - artifact_path: Path to associated artifact, if any.
+            - timestamp: Unix timestamp of the commit.
+            - turn: Turn number in the conversation/session.
+            - model_used: Name of the model that produced the commit.
+            - is_merge: Boolean indicating if this is a merge commit.
+
+    Returns:
+        True if the point was successfully upserted, False otherwise.
+    """
     project_id = commit_data.get("project_id", "default")
     message    = commit_data.get("message", "")
     if not message:
@@ -122,7 +192,8 @@ def index_commit(commit_data: dict) -> bool:
 
 
 def index_graph_node(node_data: dict) -> bool:
-    """Index a graph node in the project's Qdrant graph collection.
+    """
+    Index a graph node in the project's Qdrant graph collection.
 
     Embeds the node's signature/label and docstring into a dense vector,
     then upserts the point into the project-scoped graph collection.
@@ -176,7 +247,17 @@ def index_graph_node(node_data: dict) -> bool:
 
 def search_commits(query: str, project_id: str = "default",
                    limit: int = 10) -> list:
-    """Semantic search over a project's commit messages."""
+    """
+    Semantic search over a project's commit messages.
+
+    Args:
+        query: Natural language search query.
+        project_id: Project identifier to search within.
+        limit: Maximum number of results to return.
+
+    Returns:
+        List of dictionaries with commit metadata and similarity score.
+    """
     vector = _embed(query)
     if not vector:
         return []
@@ -199,7 +280,17 @@ def search_commits(query: str, project_id: str = "default",
 
 def search_graph_nodes(query: str, project_id: str = "default",
                        limit: int = 10) -> list:
-    """Semantic search over a project's code/prose graph nodes."""
+    """
+    Semantic search over a project's code/prose graph nodes.
+
+    Args:
+        query: Natural language search query.
+        project_id: Project identifier to search within.
+        limit: Maximum number of results to return.
+
+    Returns:
+        List of dictionaries with node metadata and similarity score.
+    """
     vector = _embed(query)
     if not vector:
         return []

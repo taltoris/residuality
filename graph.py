@@ -294,6 +294,32 @@ def get_neighbors(graph, node_id: str) -> dict:
             "calls": calls, "called_by": called_by}
 
 
+def graph_node_ranges(graph, filepath: str) -> list:
+    """The `(line_start, line_end)` of every node recorded inside one file.
+
+    These are the only lines an edit may cut on. A node begins at a statement
+    and ends at one, so a cut between two of them cannot split a function the
+    way an arbitrary line number can -- which is the whole reason the index is
+    worth having. Nodes with no usable range (prose, or a graph built before
+    ranges were recorded) are skipped rather than guessed at; the caller falls
+    back to blank lines for those.
+    """
+    if not graph:
+        return []
+    ranges = []
+    for node in graph.get_nodes():
+        if _attr(node, "file") != filepath:
+            continue
+        try:
+            start = int(_attr(node, "line_start"))
+            end   = int(_attr(node, "line_end"))
+        except (TypeError, ValueError):
+            continue                    # no range on this node, or not a number
+        if start >= 1 and end >= start:
+            ranges.append((start, end))
+    return ranges
+
+
 # Trailing dot-segments that are file extensions, not module components.
 _FILENAME_TAILS = {
     "h", "hh", "hpp", "hxx", "inc", "c", "cc", "cpp", "cxx", "rs",

@@ -51,6 +51,31 @@
                        autocomplete="new-password"
                        placeholder="{{ '•••••• stored — blank keeps it' if api_key_set else 'not set' }}">
             </div>
+            <div>
+                <label for="s-ctx">Context window <span style="color:#484f58;">(tokens)</span></label>
+                <input id="s-ctx" name="context_tokens" type="number"
+                       min="1" step="1024"
+                       value="{{ model_cfg.get('context_tokens','') }}"
+                       placeholder="{{ context_tokens_default }}">
+                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
+                    How much the model holds at once. One edit may send about half the
+                    window, in characters — the replacement comes back about as long as the
+                    range it replaces, and both have to fit.
+                </p>
+            </div>
+            <div>
+                <label for="s-maxchars">Max characters per edit <span style="color:#484f58;">(blank
+                    = from the window, 0 = no limit)</span></label>
+                <input id="s-maxchars" name="max_edit_chars" type="number"
+                       min="0" step="1000"
+                       value="{{ model_cfg.get('max_edit_chars','') }}"
+                       placeholder="{{ resolved_max_edit_chars }}">
+                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
+                    In force now: <strong>{{ "{:,}".format(resolved_max_edit_chars) }}</strong>
+                    characters. Past it a range is cut back to whole lines and the rest is
+                    kept as it is.
+                </p>
+            </div>
         </div>
 
         <div style="margin-top:0.75rem;">

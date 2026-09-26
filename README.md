@@ -176,13 +176,35 @@ the reply into that editor box. From there it is an ordinary edit: the diff come
 already on, Save splices it, Cancel drops it. The endpoint writes nothing and commits
 nothing, so the diff *is* the review step; there is no second write path to get wrong.
 
-A range too long to send is cut back to the first whole lines that fit, and the reply
-covers only those. This is worth being exact about, because the alternative — taking the
-answer as a rewrite of the whole range — silently deletes every line the model never
-saw. So the model is told plainly that it is looking at part of the range, the covered
-lines are named in the status line, and the lines past them are kept verbatim
-underneath the reply. Save then writes the part it was given and leaves the rest of the
-range exactly as it was.
+A range too long for one call is **split on the graph's node boundaries** and sent as one
+call per chunk, then stitched back into a single replacement. This is the index doing what
+it exists for: a node begins and ends at a statement, so a cut there keeps whole functions,
+where an arbitrary line number cuts one in half — and a small-context model can still rewrite
+a whole file, one node at a time, without ever being handed a range it cannot hold. The
+status line names how many calls it took. A gap between nodes that is too big to send is
+cut on blank lines, and a lone node larger than the budget is the only case cut on lines,
+because there is nothing else left to cut on. Every reply covers exactly the lines that
+were on screen, so there is no partial answer and no tail to splice back underneath it.
+
+How long is *too long* is a setting, and it is sized against the thing that actually
+constrains it: the model's **context window**, in tokens (`OWUI_CONTEXT_TOKENS`,
+262144 by default). One edit may send about **half** the window, converted to
+characters — because the replacement comes back roughly as long as the range it
+replaces, and the model has to hold both at once. At a 262144-token window that is
+roughly 524288 characters.
+
+It used to be a hardcoded 6000, which is small in absolute terms but was also measured
+against nothing: a 219-line file was cut at line 170 and the tail was never sent at all,
+so an ordinary "add comments to this file" silently left the last 49 lines alone. That is
+what the split replaced — a long range is now several node-sized calls, which makes the
+budget a per-call ceiling rather than a cap on how much can be edited. Against a
+262144-token window, 6000 characters is well under 1% of what the model can hold — and
+even a 32000-character limit would be only about 3%.
+
+**Max characters per edit** takes a number to pin the budget outright, `0` for no limit,
+or blank to derive it from the window again. An explicit number replaces the derived one
+rather than being clamped against it, and a value that cannot be used falls back rather
+than failing the request.
 
 The reply is cleaned up in exactly two ways, because there are exactly two shapes
 where what the model said is unambiguous:
@@ -205,7 +227,9 @@ reply so the status line can say which cleanup happened.
 
 Everything past that is the prompt's job, which is why it is a setting. An empty reply
 is refused outright rather than opening an empty box over a live range, where Save would
-quietly delete it.
+quietly delete it. With several chunks, a chunk that comes back empty is kept verbatim and
+named in the status line instead, and only an all-empty reply is refused — the same
+principle, applied per piece of the range.
 
 The older node page has its own edit path (`graph_edit`) which asks a model and then
 **commits**. It gets the same two cleanups and the same configured prompt, because a
@@ -214,8 +238,8 @@ fenced reply there would reach history, past the point a diff can undo.
 ### Model settings
 
 The homepage settings panel covers: the shared **default** model, separate **chat** and
-**edit** overrides, the endpoint URL, the API key, and the prompt and system prompt used
-for edits. Precedence is per-call model → slot override → default → environment, and an
+**edit** overrides, the endpoint URL, the API key, the prompt and system prompt used for
+edits, the model's **context window**, and how much of a range one edit may send. Precedence is per-call model → slot override → default → environment, and an
 empty override means *follow the default* rather than *unset*.
 
 Settings are saved to `residuality_models.cfg`, beside the projects and inside the

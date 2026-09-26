@@ -1276,19 +1276,10 @@
             .catch(function(e) { setAiStatus('could not load models: ' + e, '#f85149'); });
     }
 
-    // The reply is the model's replacement for the lines it was actually sent.
-    // When a range had to be cut down to fit the send limit those lines are a
-    // prefix of what is on screen, and the lines after them were never in the
-    // answer -- so they are kept verbatim underneath it. Without this the prefix
-    // would be written over the whole range, which is how a long file silently
-    // loses its tail.
-    function spliceTail(st, reply, coveredEnd) {
-        var covered = coveredEnd - st.lineStart + 1;
-        var total   = st.lineEnd - st.lineStart + 1;
-        if (!(covered > 0) || covered >= total) return reply;
-        return reply.split('\n').concat(st.content.split('\n').slice(covered)).join('\n');
-    }
-
+    // The server answers for the whole range: a range too long for one call is
+    // split on the graph's node boundaries and stitched there, so `d.content`
+    // always stands in for exactly the lines on screen. Nothing is kept back
+    // here -- there is no prefix to fold a tail under any more.
     function askAi() {
         if (!aiAvailable()) return;
         var box = document.getElementById('modal-ai-prompt');
@@ -1331,13 +1322,18 @@
                     return;
                 }
                 closeAiPopover();
-                enterEditMode(spliceTail(st, d.content, d.line_end));
+                enterEditMode(d.content);
                 var note = 'accepted a rewrite of lines ' + d.line_start + '\u2013' + d.line_end +
                            ' from ' + (d.model || 'the model');
+                if (d.chunk_count > 1) note += ' in ' + d.chunk_count + ' calls';
                 if (d.think_stripped)  note += ', thinking trace stripped';
                 if (d.fences_stripped) note += ', code fence removed';
-                if (d.truncated)       note += ', lines ' + (d.line_end + 1) + '\u2013' + st.lineEnd +
-                                               ' were too long to send and are kept as they were';
+                if (d.empty_chunks && d.empty_chunks.length) {
+                    var n = d.empty_chunks.length;
+                    note += ', ' + n + ' portion' + (n > 1 ? 's' : '') +
+                            ' came back empty and ' + (n > 1 ? 'were' : 'was') +
+                            ' kept as ' + (n > 1 ? 'they were' : 'it was');
+                }
                 setEditStatus(note + ' — review the diff, then Save or Cancel', '#8b949e');
             })
             .catch(function(e) {

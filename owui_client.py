@@ -35,6 +35,31 @@ PLANNER_MODEL    = os.getenv("PLANNER_MODEL",      "Qwen3.5-9B-Q4_0.gguf")
 
 CONFIG_FILENAME  = "residuality_models.cfg"
 
+# The model's context window, in tokens. This is the constraint an edit budget
+# stands in for, so it is the thing worth configuring -- 262144 is what the
+# routed model reports.
+CONTEXT_TOKENS   = int(os.getenv("OWUI_CONTEXT_TOKENS", "262144"))
+
+# Characters per token, roughly. A real tokenizer runs about 3.5 for code and 4
+# for prose; this only has to be close, because it feeds a budget that is
+# already half the window.
+CHARS_PER_TOKEN  = 4
+
+# A replacement comes back about as long as the range it replaces, and the model
+# has to hold both at once -- so only half the window can be input, with the
+# other half left for the reply (plus the system prompt and the instruction).
+REPLY_SHARE      = 0.5
+
+
+def chars_for_context(context_tokens: int) -> int:
+    """A per-edit character budget for a model with this context window."""
+    return int(context_tokens * CHARS_PER_TOKEN * REPLY_SHARE)
+
+
+# What an install gets with nothing set, and the fallback when a setting is
+# unusable. MAX_EDIT_NODE_CHARS still overrides it, and 0 still means no limit.
+MAX_EDIT_CHARS   = chars_for_context(CONTEXT_TOKENS)
+
 # The system prompt an AI-assisted edit starts from. It is a *setting* because
 # how a given model wants to be asked for bare replacement text varies, but the
 # default is the one that was always sent, so an unconfigured install behaves
@@ -73,6 +98,8 @@ def load_config() -> dict:
         "planner":      PLANNER_MODEL,
         "summarizer":   SUMMARIZER_MODEL,
         "edit_prompt":  DEFAULT_EDIT_PROMPT,
+        "context_tokens": str(CONTEXT_TOKENS),
+        "max_edit_chars": os.getenv("MAX_EDIT_NODE_CHARS", ""),   # "" = from window
         "owui_url":     OWUI_URL,
         "owui_api_key": OWUI_API_KEY,
     }
@@ -130,6 +157,141 @@ def save_config(cfg: dict) -> Path:
 def resolve_model(cfg: dict, slot: str) -> str:
     """The model a role actually uses, after fallback to the shared default."""
     return cfg.get(slot) or cfg.get("default") or DEFAULT_MODEL
+
+
+def resolve_max_edit_chars(cfg: dict) -> int:
+    """Characters of a range to send in one edit. 0 (or less) means no limit.
+
+    An explicit max_edit_chars wins; otherwise the budget is derived from the
+    model's context window, which is what it actually stands in for. Bad values
+    fall back rather than raising: this is read on the request path, and a typo
+    in a settings box should not turn every edit into a 500.
+    """
+    raw = str(cfg.get("max_edit_chars") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"max_edit_chars is not a whole number: {raw!r} -- "
+                f"deriving it from the context window"
+            )
+
+    raw_window = str(cfg.get("context_tokens") or CONTEXT_TOKENS).strip()
+    try:
+        window = int(raw_window)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"context_tokens is not a whole number: {raw_window!r} -- "
+            f"using {CONTEXT_TOKENS}"
+        )
+        window = CONTEXT_TOKENS
+    return chars_for_context(window)
+
+
+def plan_edit_chunks(lines: list, line_start: int, line_end: int,
+                     limit: int, node_ranges=()) -> list:
+    """Split a line range into contiguous chunks that each fit `limit` chars.
+
+    Returns inclusive 1-based `(start, end)` pairs that tile
+    `[line_start, line_end]` exactly -- no gap, no overlap -- so joining one
+    reply per chunk with newlines is a drop-in replacement for the whole range.
+    The caller sends one model call per chunk and stitches the answers, which
+    is how a range larger than the budget stays editable instead of being cut
+    down to a prefix.
+
+    Cuts go on the graph's node boundaries first, because a node begins and
+    ends at a statement: a cut there keeps whole functions, where an arbitrary
+    line number splits them. A gap between nodes that is itself too big is cut
+    on blank lines, which is also the only seam there is when a file has no
+    nodes recorded at all (prose, unparsed types). A single node larger than
+    the budget is cut on lines -- the one case where a line boundary is all
+    there is to go on.
+
+    `limit <= 0` means no budget, so the whole range is one chunk, matching the
+    "no limit" reading `resolve_max_edit_chars` gives.
+    """
+    n = line_end - line_start + 1
+    if n <= 0:
+        return []
+    if limit <= 0:
+        return [(line_start, line_end)]
+
+    seg = lines[line_start - 1:line_end]
+
+    def size(a: int, b: int) -> int:
+        """Characters in offsets [a, b) once joined by newlines."""
+        return sum(len(seg[i]) for i in range(a, b)) + max(b - a - 1, 0)
+
+    def blank_seams(a: int, b: int) -> list:
+        """Offsets in [a, b) a split may start on: the line after a blank run.
+
+        The blank stays with the piece above, so a piece never opens on blank
+        lines. These are consulted only inside a piece that has to be split,
+        which keeps an ordinary node-sized edit from being cut on a blank line
+        that happens to sit inside a function.
+        """
+        return [i + 1 for i in range(a, b - 1)
+                if not seg[i].strip() and seg[i + 1].strip()]
+
+    def split_lines(a: int, b: int) -> list:
+        """Fill greedily, cutting on whole lines. Never splits one line, so a
+        single over-long line comes back as a chunk of its own."""
+        pieces, start, used = [], a, 0
+        for i in range(a, b):
+            add = len(seg[i]) + (1 if i > start else 0)
+            if i > start and used + add > limit:
+                pieces.append((start, i))
+                start, used = i, len(seg[i])
+            else:
+                used += add
+        pieces.append((start, b))
+        return pieces
+
+    def divide(a: int, b: int) -> list:
+        """Offsets [a, b) -> atoms that each fit, splitting only when forced."""
+        if size(a, b) <= limit:
+            return [(a, b)]
+        seams = blank_seams(a, b)
+        if not seams:
+            return split_lines(a, b)
+        atoms, start = [], a
+        for seam in seams + [b]:
+            atoms.extend(split_lines(start, seam)
+                         if size(start, seam) > limit else [(start, seam)])
+            start = seam
+        return atoms
+
+    # Node boundaries first: those are the cuts the graph can vouch for.
+    node_cuts = set()
+    for start, end in node_ranges or ():
+        for boundary in (start, end + 1):
+            offset = boundary - line_start
+            if 0 < offset < n:
+                node_cuts.add(offset)
+    starts = [0] + sorted(node_cuts) + [n]
+
+    # Then split whatever is still too big: the module-level run between two
+    # nodes, a file with no nodes at all, or one function past the budget.
+    atoms = []
+    for i in range(len(starts) - 1):
+        atoms.extend(divide(starts[i], starts[i + 1]))
+
+    # Pack neighbouring atoms into a chunk while they still fit. Atoms are in
+    # order and contiguous, so every chunk is a contiguous line range.
+    chunks, a, b, used = [], 0, 0, 0
+    for start, end in atoms:
+        atom = size(start, end)
+        if b > a and used + 1 + atom > limit:
+            chunks.append((line_start + a, line_start + b - 1))
+            a, b, used = start, end, atom
+        elif b > a:
+            b, used = end, used + 1 + atom
+        else:
+            a, b, used = start, end, atom
+    if b > a:
+        chunks.append((line_start + a, line_start + b - 1))
+    return chunks
 
 
 def apply_model_config(client, cfg: dict):
