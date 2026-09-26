@@ -78,7 +78,8 @@
 #node-modal .shell { position:relative; }
 #node-modal .ai-pop { display:none;position:absolute;top:46px;right:14px;z-index:6;width:min(430px,86%);background:#161b22;border:0.5px solid #30363d;border-radius:10px;padding:10px;box-shadow:0 10px 30px rgba(0,0,0,0.55); }
 #node-modal .ai-pop .ai-lab { font-size:10px;text-transform:uppercase;letter-spacing:0.04em;color:#8b949e;margin-bottom:2px; }
-#node-modal .ai-pop input { font-size:12px;margin-bottom:6px; }
+#node-modal .ai-pop input, #node-modal .ai-pop select { font-size:12px;margin-bottom:6px; }
+#node-modal .ai-pop select { width:100%; }
 #node-modal .ai-pop textarea { min-height:58px;font-family:'Courier New',monospace;font-size:12px;margin-bottom:0;resize:vertical; }
 #node-modal .ai-pop .ai-row { display:flex;align-items:center;gap:6px;margin-top:8px; }
 #node-modal .ai-pop .ai-hint { flex:1;min-width:0;font-size:11px;line-height:1.3;color:#8b949e; }
@@ -177,8 +178,9 @@
         </header>
         <div class="ai-pop" id="modal-ai-pop">
             <div class="ai-lab">Model</div>
-            <input id="modal-ai-model" list="modal-ai-models" placeholder="loading models…">
-            <datalist id="modal-ai-models"></datalist>
+            <select id="modal-ai-model" aria-label="Model">
+                <option value="">loading models…</option>
+            </select>
             <div class="ai-lab">What should change?</div>
             <textarea id="modal-ai-prompt" rows="3" spellcheck="false"
                       placeholder="e.g. make the null check handle empty strings"></textarea>
@@ -1234,10 +1236,29 @@
         loadAiModels();
     }
 
-    // Fill the dropdown from the endpoint once per page. The saved edit model
-    // is the preselected value, so the usual case is "type and go"; if the
-    // list cannot be fetched the saved value stays in the box and the server
-    // is what refuses an unverifiable model.
+    // One option per model the endpoint offers, plus a blank one meaning "use
+    // whatever is configured". A saved id the endpoint no longer offers is kept
+    // too: an id that has gone away should stay visible rather than being
+    // silently swapped for a different model.
+    function fillModelSelect(sel, models, current) {
+        var html = '<option value="">(use the configured default)</option>', seen = false;
+        models.forEach(function(m) {
+            if (m.id === current) seen = true;
+            html += '<option value="' + esc(m.id) + '">' + esc(m.name || m.id) + '</option>';
+        });
+        if (current && !seen) {
+            html += '<option value="' + esc(current) + '">' + esc(current) +
+                    ' - not offered by this key</option>';
+        }
+        sel.innerHTML = html;
+        sel.value = current;
+    }
+
+    // Fill the dropdown from the endpoint once per page. The saved edit model is
+    // what comes up preselected, so the usual case is "pick and go". It is a
+    // <select> rather than a free-text box because the ids on offer are exactly
+    // what the configured key can see, and the server refuses anything else
+    // anyway. The blank option keeps the control usable when the fetch fails.
     function loadAiModels() {
         if (aiModelsLoaded) return;
         var input = document.getElementById('modal-ai-model');
@@ -1245,11 +1266,7 @@
             .then(function(r){ return r.json(); })
             .then(function(d) {
                 var models = d.models || [];
-                document.getElementById('modal-ai-models').innerHTML =
-                    models.map(function(m) {
-                        return '<option value="'+esc(m.id)+'" label="'+esc(m.name)+'"></option>';
-                    }).join('');
-                if (!input.value) input.value = d.resolved_edit || d.current_default || '';
+                fillModelSelect(input, models, d.resolved_edit || d.current_default || '');
                 aiModelsLoaded = true;
                 setAiStatus(models.length
                         ? models.length + ' models at ' + (d.endpoint || 'the endpoint')
@@ -1257,6 +1274,19 @@
                     models.length ? '#8b949e' : '#d29922');
             })
             .catch(function(e) { setAiStatus('could not load models: ' + e, '#f85149'); });
+    }
+
+    // The reply is the model's replacement for the lines it was actually sent.
+    // When a range had to be cut down to fit the send limit those lines are a
+    // prefix of what is on screen, and the lines after them were never in the
+    // answer -- so they are kept verbatim underneath it. Without this the prefix
+    // would be written over the whole range, which is how a long file silently
+    // loses its tail.
+    function spliceTail(st, reply, coveredEnd) {
+        var covered = coveredEnd - st.lineStart + 1;
+        var total   = st.lineEnd - st.lineStart + 1;
+        if (!(covered > 0) || covered >= total) return reply;
+        return reply.split('\n').concat(st.content.split('\n').slice(covered)).join('\n');
     }
 
     function askAi() {
@@ -1301,12 +1331,13 @@
                     return;
                 }
                 closeAiPopover();
-                enterEditMode(d.content);
-                var note = 'accepted a rewrite of lines ' + st.lineStart + '\u2013' + st.lineEnd +
+                enterEditMode(spliceTail(st, d.content, d.line_end));
+                var note = 'accepted a rewrite of lines ' + d.line_start + '\u2013' + d.line_end +
                            ' from ' + (d.model || 'the model');
                 if (d.think_stripped)  note += ', thinking trace stripped';
                 if (d.fences_stripped) note += ', code fence removed';
-                if (d.truncated)       note += ', the range was too long to send in full';
+                if (d.truncated)       note += ', lines ' + (d.line_end + 1) + '\u2013' + st.lineEnd +
+                                               ' were too long to send and are kept as they were';
                 setEditStatus(note + ' — review the diff, then Save or Cancel', '#8b949e');
             })
             .catch(function(e) {

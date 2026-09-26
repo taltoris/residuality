@@ -107,6 +107,7 @@ class ContextBuilder:
         file_path: Optional[str] = None,
         line_start: Optional[int] = None,
         line_end: Optional[int] = None,
+        requested_line_end: Optional[int] = None,
         system_prompt: Optional[str] = None,
     ) -> list:
         """Build context for a surgical node edit.
@@ -115,6 +116,11 @@ class ContextBuilder:
         given model wants to be asked for bare replacement text differs. The
         fallback is the same string that was hardcoded here, so an install
         that never touches the setting sends what it always did.
+
+        `requested_line_end` is set when the range on screen was longer than the
+        send limit, which makes `line_end` a prefix of it. Saying so matters: a
+        model that believes it holds the whole range answers as if it did, and
+        its answer is spliced back over the range.
         """
         system_parts = [
             system_prompt or (
@@ -130,6 +136,13 @@ class ContextBuilder:
             system_parts.append(
                 f"## Target\nFile: {file_path}, lines {line_start}–{line_end}\nNode: {node_id}"
             )
+            if requested_line_end and requested_line_end > line_end:
+                system_parts.append(
+                    f"## Partial range\nOnly lines {line_start}–{line_end} of the "
+                    f"requested {line_start}–{requested_line_end} are shown here. "
+                    f"Return replacement content for the lines shown and nothing "
+                    f"else; the rest of the range is being kept as it is."
+                )
 
         messages = [{
             "role":    "system",

@@ -207,7 +207,7 @@ def settings_context() -> dict:
 
     The model list is deliberately *not* fetched here. This is the homepage,
     and a slow or unreachable OWUI would otherwise stall every page load — the
-    panel fills its datalists from /api/models once the page is up, and shows
+    panel fills its dropdowns from /api/models once the page is up, and shows
     the saved value as the current selection either way.
     """
     cfg = load_config()
@@ -1087,15 +1087,29 @@ def graph_ai_edit(project_id: str):
             f"Range starts at line {line_start} but {filepath} has "
             f"{len(lines)} lines - the graph is stale, rebuild it"
         )}), 409
-    content = "\n".join(lines[line_start - 1:min(line_end, len(lines))])
+    line_end = min(line_end, len(lines))
+    selected = lines[line_start - 1:line_end]
 
-    truncated = len(content) > MAX_EDIT_NODE_CHARS
-    if truncated:
-        # Head-kept: a definition's signature and shape are at the top, and the
-        # tail of a long range is usually it recursing into more of the same.
-        # Reported back so the UI can say the model saw less than what is on
-        # screen rather than quietly answering about a fragment.
-        content = content[:MAX_EDIT_NODE_CHARS]
+    # Head-kept, and cut on a *line* boundary: half a line would be spliced back
+    # in where a whole one was. The head is the half worth keeping, because a
+    # definition's signature and shape are at the top.
+    #
+    # `shown_end` is what the reply actually covers, and it is what the caller
+    # splices over. An answer to a prefix is not an answer to the whole range;
+    # treating it as one is how a long range silently loses its tail.
+    shown_end = line_end
+    if len("\n".join(selected)) > MAX_EDIT_NODE_CHARS:
+        budget, kept = MAX_EDIT_NODE_CHARS, 0
+        for i, line in enumerate(selected):
+            need = len(line) + (1 if i else 0)      # + the newline that joins it
+            if need > budget:
+                break
+            budget -= need
+            kept = i + 1
+        kept      = max(kept, 1)                    # never send an empty range
+        shown_end = line_start + kept - 1
+    content   = "\n".join(selected[:shown_end - line_start + 1])
+    truncated = shown_end < line_end
 
     known, list_error = list_models(base_url=owui.base_url, api_key=owui.api_key)
     if known:
@@ -1123,7 +1137,8 @@ def graph_ai_edit(project_id: str):
         rolling_summary=_conversation_state.get(project_id, {}).get("summary"),
         file_path=filepath,
         line_start=line_start,
-        line_end=min(line_end, len(lines)),
+        line_end=shown_end,
+        requested_line_end=line_end if truncated else None,
         system_prompt=model_cfg.get("edit_prompt"),
     )
 
@@ -1142,7 +1157,8 @@ def graph_ai_edit(project_id: str):
         "fences_stripped": fences_stripped,
         "truncated":      truncated,
         "line_start":     line_start,
-        "line_end":       line_end,
+        "line_end":       shown_end,
+        "requested_end":  line_end,
     })
 
 # ── Merge ─────────────────────────────────────────────────────────────────

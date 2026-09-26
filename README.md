@@ -176,6 +176,14 @@ the reply into that editor box. From there it is an ordinary edit: the diff come
 already on, Save splices it, Cancel drops it. The endpoint writes nothing and commits
 nothing, so the diff *is* the review step; there is no second write path to get wrong.
 
+A range too long to send is cut back to the first whole lines that fit, and the reply
+covers only those. This is worth being exact about, because the alternative — taking the
+answer as a rewrite of the whole range — silently deletes every line the model never
+saw. So the model is told plainly that it is looking at part of the range, the covered
+lines are named in the status line, and the lines past them are kept verbatim
+underneath the reply. Save then writes the part it was given and leaves the rest of the
+range exactly as it was.
+
 The reply is cleaned up in exactly two ways, because there are exactly two shapes
 where what the model said is unambiguous:
 
@@ -217,7 +225,9 @@ clearing a field hands it back. The file is `0600` because it can hold an API ke
 blank key field means *keep the stored one* — the value is never sent back to the
 browser. The model list is filled in by JavaScript after the page renders, so a slow or
 dead endpoint delays a dropdown rather than the homepage, and an unreachable one leaves
-the saved value in a datalist you can still type into.
+the saved value selected in the dropdown. The slots are `<select>`s, and each one is
+rendered with its saved value already in it, so a failed fetch leaves a control that
+still posts what was stored rather than an empty one that would post nothing.
 
 **The allowlist is the API key.** `/api/models` returns whatever the configured key can
 see, cached for 30s, and an edit naming a model the key cannot reach is refused before
