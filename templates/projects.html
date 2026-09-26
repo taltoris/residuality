@@ -72,8 +72,9 @@
                        placeholder="{{ resolved_max_edit_chars }}">
                 <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
                     In force now: <strong>{{ "{:,}".format(resolved_max_edit_chars) }}</strong>
-                    characters. Past it a range is cut back to whole lines and the rest is
-                    kept as it is.
+                    characters per call. A longer range is split on the graph's node
+                    boundaries and sent as several calls, so this is a per-call ceiling,
+                    not a cap on how much can be edited.
                 </p>
             </div>
         </div>
