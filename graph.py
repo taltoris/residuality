@@ -345,6 +345,134 @@ def _import_label(name: str) -> str:
     return name if tail.lower() in _FILENAME_TAILS else tail
 
 
+# ── Prompt-sized project summary ──────────────────────────────────────────
+
+# A minified bundle earns nothing in a prompt: its symbol names are mangled
+# (`m`, `mb`, `$d`) and its line numbers cannot address it. That file averages
+# 493 chars per line, and five separate functions (`mb`, `Ab`, `bj`, `dj`, `ej`)
+# all sit on line 14 -- so 61% of its 346 nodes are recorded as a single line,
+# and any two of them are indistinguishable by address. It also skews the graph
+# absurdly: two React bundles are 52% of graph.dot's bytes and 370 of its 731
+# nodes. Detected by path convention *and*, so a future bundle cannot slip
+# through on naming alone, by symbol density: that file scores 1.30 symbols per
+# line, where the densest hand-written file here (test_chunking.py) scores 0.08.
+_MINIFIED_PATH_HINTS = (".min.", "-min.", "/vendor/", "/node_modules/")
+_MINIFIED_DENSITY    = 0.5      # symbols per line
+
+# Files with more symbols than this list only the first N. Nothing in this
+# repo comes close (app.py leads at 59); it exists so one pathological file
+# cannot blow the context budget.
+SUMMARY_SYMBOL_CAP = 80
+
+
+def _looks_minified(filepath: str, symbol_count: int, span: int) -> bool:
+    low = filepath.lower()
+    if any(hint in low for hint in _MINIFIED_PATH_HINTS):
+        return True
+    return span > 0 and symbol_count / span >= _MINIFIED_DENSITY
+
+
+def render_graph_summary(dot_path: str) -> str:
+    """A prompt-sized outline of the project: files, imports, symbol names.
+
+    Built by *re-rendering* the graph rather than by filtering graph.dot.
+    graph.dot is 192 KB / ~48K tokens on this repo; injected whole into every
+    chat message it spent most of a conversation's budget before the first
+    question was asked, and 52% of its bytes were two vendored React bundles.
+    Three properties make the outline cheap:
+
+      * `contains` edges are pure restatement. A node id already carries its
+        own path, so `app.py::chat_send` says whose it is with no edge at all.
+        702 of the 781 edges here are these.
+      * `imports` edges are already module-level names -- `os`, `flask`,
+        `artifact` -- not node ids, so they need no resolving.
+      * the only containment worth keeping past the names is that a method
+        belongs to a class, which the id also carries.
+
+    Line numbers are deliberately absent. This answers "what exists", not
+    "which lines"; the exact `(line_start, line_end)` span is looked up from
+    the graph when an edit is actually made.
+    """
+    graph = load_graph(dot_path)
+    if graph is None:
+        return ""
+
+    type_by_id, label_by_id = {}, {}
+    for node in graph.get_nodes():
+        nid = node.get_name().strip('"')
+        type_by_id[nid]  = _attr(node, "type")
+        label_by_id[nid] = _attr(node, "label")
+
+    children, imports = {}, {}
+    for edge in graph.get_edges():
+        src = edge.get_source().strip('"')
+        dst = edge.get_destination().strip('"')
+        lbl = edge.get_attributes().get("label", "").strip('"')
+        if lbl == "contains":
+            children.setdefault(src, []).append(dst)
+        elif lbl == "imports":
+            imports.setdefault(src, []).append(dst)
+
+    def _member_name(node_id: str) -> str:
+        """What to show for a node, stripped of its file prefix.
+
+        Ids nest as `file::name` or `file::Class::method`, so the last segment
+        is the symbol itself. (Splitting on the *first* `::` would keep the
+        class in the method name, giving `ArtifactRepo.ArtifactRepo::create`.)
+
+        A prose section's slug is arbitrary (`README.md::s3`), so its label
+        ("The cellar door") is the readable name. Everywhere else the segment
+        is the real name and already says more than the label would --
+        `div#chat-layout` beats "chat-layout".
+        """
+        suffix = node_id.split("::")[-1] if "::" in node_id else node_id
+        if re.fullmatch(r"s\d+", suffix) and label_by_id.get(node_id):
+            return label_by_id[node_id]
+        return suffix
+
+    out = []
+    for node in graph.get_nodes():
+        fid   = node.get_name().strip('"')
+        ftype = type_by_id.get(fid, "")
+        if ftype not in LEAF_FILE_TYPES:
+            continue
+
+        kids = [k for k in children.get(fid, []) if k != fid]
+        try:
+            span = (int(_attr(node, "line_end"))
+                    - int(_attr(node, "line_start")) + 1)
+        except (TypeError, ValueError):
+            span = 0
+
+        if _looks_minified(fid, len(kids), span):
+            # Named but not explored -- it is a dependency, like an import.
+            # Its symbols are mangled single letters (`m`, `mb`, `$d`) and say
+            # nothing, so listing them would be the one thing that put the
+            # bundle back into the prompt.
+            out.append(f"- {fid}")
+            continue
+
+        out.append(f"- {fid}")
+
+        targets = imports.get(fid, [])
+        if targets:
+            out.append(f"    imports: {', '.join(targets)}")
+
+        if not kids:
+            continue
+        names = []
+        for kid in kids:
+            names.append(_member_name(kid))
+            for sub in children.get(kid, []):
+                names.append(f"{_member_name(kid)}.{_member_name(sub)}")
+        shown = names[:SUMMARY_SYMBOL_CAP]
+        extra = len(names) - len(shown)
+        out.append("    contains: " + ", ".join(shown)
+                   + (f" … (+{extra} more)" if extra else ""))
+
+    return "\n".join(out)
+
+
 # ── Level 1: File dependency graph ────────────────────────────────────────
 
 def render_file_graph(dot_path: str, show_external: bool = False) -> str:

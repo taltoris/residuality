@@ -16,7 +16,7 @@ store). Nothing leaves your machine.
 | **Artifact store** | Every project is a real git repo under `/repos/<project_id>`. `read`, `write`, `branch`, `merge`, `checkout`, `diff` — all backed by GitPython. |
 | **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts`, `.rs` and `.html`/`.htm` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions, template sections and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
 | **Memory** | Each commit indexes its message and its graph nodes into Qdrant, and generates an *episodic snapshot* (state, decisions, open questions) that is also vectorised. |
-| **Chat** | Chat is scoped to a project and runs on the *planner* model. Every message is sent with fresh context — the recent git log, `README.md` and `graph.dot` — plus the history of the conversation you are in. Conversations are stored per project and listed in a sidebar; a new one starts with the injected context and nothing from any other conversation. |
+| **Chat** | Chat is scoped to a project and runs on the *planner* model. Every message is sent with fresh context — the recent git log, `README.md` and an outline of `graph.dot` — plus the history of the conversation you are in. Conversations are stored per project and listed in a sidebar; a new one starts with the injected context and nothing from any other conversation. |
 | **Merge** | Pick two divergent commits; the model reconciles conflicting files into a merge commit with two parents. |
 
 ---
@@ -133,8 +133,9 @@ see [Model settings](#model-settings).
    Either way the result is a draft in the box, shown as a diff against the original;
    Save splices the range and leaves it dirty for Regenerate & Commit.
 5. **Chat** — the tab is a planning conversation on the planner model. Every message
-   carries the recent git log (last 10 commits), the project's `README.md` and its
-   `graph.dot`, plus the history of the conversation you are in. Conversations are
+   carries the recent git log (last 10 commits), the project's `README.md` and an
+   outline of its `graph.dot` — files, imports and symbol names, not the raw DOT —
+   plus the history of the conversation you are in. Conversations are
    stored under `.residuality/chats/` (one JSON file each, surviving restarts) and
    listed in the sidebar; **+ New conversation** starts fresh with the injected
    context and none of the history from any other conversation.
@@ -330,8 +331,18 @@ Two sharp edges worth keeping in mind when adding anything here:
   endpoint returns both; `format_snapshot_for_context` renders the right fields.
 - **Chat conversations are files, not memory.** Each conversation is a JSON file
   under `.residuality/chats/`, so history survives a restart. The injected context
-  (git log, `README.md`, `graph.dot`) is re-read on every message, so it is always
-  current; a conversation carries only its own history, never another's.
+  (git log, `README.md`, the graph outline) is re-read on every message, so it is
+  always current; a conversation carries only its own history, never another's.
+- **Chat carries a graph *summary*, not graph.dot.** `render_graph_summary`
+  re-renders the parsed graph as files, imports and symbol names. The raw DOT is
+  192 KB here — ~48K tokens on *every* message, most of a conversation's budget
+  gone before the first question — and 52% of it was two vendored React bundles.
+  Three properties make the outline small: `contains` edges are pure restatement
+  (a node id already carries its own path, so 702 of the 781 edges say nothing the
+  ids do not), `imports` edges are already module-level names rather than node ids,
+  and the only containment worth keeping is that a method belongs to a class.
+  Line numbers are deliberately left out: the outline answers "what exists", and
+  the exact span is looked up from the graph when an edit is actually made.
 - **Settings layer over the environment, never replace it.** `load_config` starts from
   `.env` and applies the config file on top, so a key deleted from the file falls back
   to its environment value instead of becoming empty. The alternative — writing the
@@ -358,8 +369,22 @@ Two sharp edges worth keeping in mind when adding anything here:
 - *Build Graph* skips files over 500 KB, so a minified vendor bundle (a 2.4 MB
   `babel.min.js`) never gets a section — the directory view still lists it, since
   that comes from `git ls-files` rather than `graph.dot`. Bundles just under the
-  limit are indexed, and their minified single-letter names then collide into
-  duplicate node ids.
+  limit *are* indexed, and they don't fit a line-addressed graph.
+  `static/vendor/react-dom.production.min.js` averages 493 chars per line, and five
+  separate functions (`mb`, `Ab`, `bj`, `dj`, `ej`) all sit on line 14 — so 61% of
+  its 346 nodes record the same single line, two of them cannot be told apart by
+  address, and a line-granular edit of any one would replace the other four with it.
+  The fix is a second address: `node.start_byte`/`node.end_byte` are already read
+  (they build each node's signature), so a char range could be recorded alongside
+  the line range for nodes whose lines do not distinguish them. Whether an edit
+  should then be *allowed* on a minified bundle is a separate question — it is the
+  one file in the tree nobody hand-edits.
+- Separately, minified bundles have no place in a prompt at all, whatever the graph
+  records for them — they are dependencies, not code to navigate. `render_graph_summary`
+  detects them by path convention or by symbol density (React DOM scores 1.30 symbols
+  per line against 0.08 for the densest hand-written file here) and lists the file by
+  name only, with no symbols: 370 mangled single-letter names would be the one thing
+  that put the bundles back into the context.
 - `graph_edit` (`/projects/<id>/graph/node/<node_id>`, the `graph_node.html` page) is the
   older path: it asks a model, then **commits immediately** with a generated message.
   The modal's Edit/AI flow deliberately does not use it, so the two behave differently

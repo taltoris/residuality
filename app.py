@@ -35,7 +35,7 @@ from owui_client import (
 )
 from graph import (render_file_graph, render_file_detail, render_directory_graph,
                     load_graph, get_node_by_id, get_neighbors, graph_node_ranges,
-                    export_prose)
+                    render_graph_summary, export_prose)
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -446,8 +446,12 @@ def _new_chat_id(repo: ArtifactRepo) -> str:
 def _chat_context_parts(repo: ArtifactRepo) -> list:
     """The context every chat message is sent with, read fresh each time.
 
-    Recent git log, the README and the graph. Each part degrades to a note
-    rather than failing the message when the file is missing.
+    Recent git log, the README and an outline of the graph. Each part degrades
+    to a note rather than failing the message when the file is missing.
+
+    The graph is sent as a summary rather than as graph.dot itself: the raw
+    file is ~48K tokens on this repo, which is most of a conversation's budget
+    spent before the first question. See graph.render_graph_summary.
     """
     parts = []
 
@@ -467,10 +471,15 @@ def _chat_context_parts(repo: ArtifactRepo) -> list:
         parts.append("## README.md\n(not present in this project)")
 
     try:
-        dot = repo.get_graph_dot()
-        parts.append(f"## Project Graph (graph.dot)\n{dot}")
+        dot_path = repo.repo_path / ".residuality" / "graph.dot"
+        summary  = render_graph_summary(str(dot_path))
+        if summary:
+            parts.append(f"## Project Structure\n{summary}")
+        else:
+            parts.append("## Project Structure\n(graph not built yet)")
     except Exception as e:
-        parts.append(f"## Project Graph (graph.dot)\n(not built yet: {e})")
+        logger.warning(f"Chat context: graph summary failed: {e}")
+        parts.append(f"## Project Structure\n(unavailable: {e})")
 
     return parts
 
