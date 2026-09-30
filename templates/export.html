@@ -9,7 +9,7 @@
     </p>
     <form method="post">
         <button type="submit" class="btn btn-primary">Export &amp; Download ZIP</button>
-        <a href="{{ url_for('dag', project_id=project_id) }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
+        <a href="{{ url_for('graph_view', project_id=project_id) }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
     </form>
 </div>
 {% endblock %}

@@ -22,6 +22,10 @@ services:
       # Flask
       - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-me}
       - RESIDUALITY_PORT=${RESIDUALITY_PORT:-5010}
+      # Reverse proxy: trust X-Forwarded-* (the app is behind NPM), and keep
+      # the session cookie sendable over plain http for local port-5010 access.
+      - TRUST_PROXY=${TRUST_PROXY:-true}
+      - SESSION_COOKIE_SECURE=${SESSION_COOKIE_SECURE:-false}
       - RESIDUALITY_USERNAME=${RESIDUALITY_USERNAME:-admin}
       - RESIDUALITY_PASSWORD=${RESIDUALITY_PASSWORD:-changeme}
       # External services

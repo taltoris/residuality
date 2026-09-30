@@ -12,12 +12,14 @@ import threading
 from pathlib import Path
 from functools import wraps
 from datetime import datetime
+from urllib.parse import urlsplit
 
 from flask import (
     Flask, render_template, request, redirect,
     url_for, jsonify, session, send_file, flash, abort
 )
 from dotenv import load_dotenv
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 load_dotenv()
 
@@ -25,7 +27,7 @@ from artifact  import ArtifactRepo
 from indexer   import ensure_collections, index_commit, search_commits, search_graph_nodes
 from snapshot  import (ensure_collection as ensure_snapshot_collection,
                        detect_project_type, generate_snapshot,
-                       store_snapshot, search_snapshots,
+                       store_snapshot, search_snapshots, latest_snapshot,
                        format_snapshot_for_context)
 from context   import ContextBuilder
 from owui_client import (
@@ -49,6 +51,35 @@ logger = logging.getLogger("residuality")
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "change-me")
+
+# ── Behind a reverse proxy ────────────────────────────────────────────────
+#
+# Plain WSGI knows only what the socket says: Flask sees unencrypted HTTP to
+# 127.0.0.1:5010 and has no idea a browser arrived over HTTPS at a public name.
+# Everything generated from the request then carries that internal view —
+# absolute URLs saying http://, and a session cookie that cannot be marked
+# Secure.
+#
+# ProxyFix takes the `X-Forwarded-Proto` / `-Host` / `-For` headers the proxy
+# sets and makes them the request's view of itself. The hop counts are the
+# number of proxies in front (1 here), and they are *counts* rather than
+# booleans on purpose: a caller can pre-seed those headers, and the count is
+# what decides how many values to peel off, so getting it wrong is how a
+# client forges its own scheme or address. Set TRUST_PROXY=false to turn this
+# off when the app is reached with no proxy in front at all.
+if os.getenv("TRUST_PROXY", "true").lower() in ("1", "true", "yes"):
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1,
+                            x_port=1)
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # A Secure cookie is only ever sent over HTTPS. Off by default so the
+    # direct http://host:5010 URL can still sign in during local work; turn it
+    # on for a TLS-only deployment, which is what the public name is.
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower()
+                            in ("1", "true", "yes"),
+)
 
 REPOS_PATH   = os.getenv("REPOS_PATH", "/repos")
 RES_USERNAME = os.getenv("RESIDUALITY_USERNAME", "admin")
@@ -82,11 +113,48 @@ model_cfg = reload_model_config()
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
+def _relative_url() -> str:
+    """The current request as a path on this site, never an absolute URL.
+
+    `request.url` is always absolute, and that is what made this 403 behind the
+    proxy: `?next=https://host/` is the exact shape of an open-redirect
+    payload, so a proxy or WAF rule matching that shape answers it itself and
+    the app is never reached. A path is also simply the more correct value — it
+    survives the public name changing, and it cannot point off-site at all.
+    """
+    qs = request.query_string.decode("utf-8", "replace")
+    path = request.script_root + request.path
+    return f"{path}?{qs}" if qs else path
+
+
+def _safe_next(target):
+    """A post-login destination that stays on this site, or None.
+
+    Only site-relative paths are allowed. `//evil.example` is an absolute URL
+    wearing a path's clothes, so it is refused along with anything carrying a
+    scheme or a netloc, and a backslash is refused too because browsers
+    normalise it to `/` — which would turn `\\evil.example` back into that
+    scheme-relative form after this check had passed. The login form still
+    carries an attacker-supplied `next`, and an unchecked one makes the login
+    page an open redirect.
+    """
+    if not target:
+        return None
+    if any(c in target for c in (chr(92), "\t", "\n", "\r")):  # chr(92) = \
+        return None
+    if target.startswith("//"):
+        return None
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return None
+    return target if target.startswith("/") else None
+
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("logged_in"):
-            return redirect(url_for("login", next=request.url))
+            return redirect(url_for("login", next=_relative_url()))
         return f(*args, **kwargs)
     return decorated
 
@@ -98,7 +166,8 @@ def login():
         if (request.form["username"] == RES_USERNAME and
                 request.form["password"] == RES_PASSWORD):
             session["logged_in"] = True
-            return redirect(request.args.get("next") or url_for("projects"))
+            return redirect(_safe_next(request.args.get("next"))
+                            or url_for("projects"))
         error = "Invalid credentials"
     return render_template("login.html", error=error)
 
@@ -107,6 +176,19 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+@app.route("/account")
+@login_required
+def account():
+    """Who is signed in, and the way out.
+
+    Reports the account rather than editing it: the credentials come from
+    RESIDUALITY_USERNAME / RESIDUALITY_PASSWORD in the environment, so a
+    password change here would mean writing a second source of truth for a
+    secret that .env is meant to own.
+    """
+    return render_template("account.html", username=RES_USERNAME)
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -198,19 +280,18 @@ def index_commit_async(repo: ArtifactRepo, commit_hash: str,
 @login_required
 def projects():
     return render_template("projects.html", projects=list_projects(),
-                           repos_path=REPOS_PATH,
-                           **settings_context())
+                           repos_path=REPOS_PATH)
 
 
-# ── Global settings (homepage panel) ──────────────────────────────────────
+# ── Global settings ───────────────────────────────────────────────────────
 
 def settings_context() -> dict:
-    """Template context for the settings panel on the homepage.
+    """Template context for the global settings page.
 
-    The model list is deliberately *not* fetched here. This is the homepage,
-    and a slow or unreachable OWUI would otherwise stall every page load — the
-    panel fills its dropdowns from /api/models once the page is up, and shows
-    the saved value as the current selection either way.
+    The model list is deliberately *not* fetched here. Saving has to work even
+    when OWUI is unreachable, and a slow endpoint would otherwise stall the
+    page — the panel fills its dropdowns from /api/models once the page is up,
+    and shows the saved value as the current selection either way.
     """
     cfg = load_config()
     return {
@@ -223,6 +304,18 @@ def settings_context() -> dict:
         "context_tokens_default": CONTEXT_TOKENS,
         "resolved_max_edit_chars": resolve_max_edit_chars(cfg),
     }
+
+
+@app.route("/settings")
+@login_required
+def settings_page():
+    """The program-wide settings page: endpoint, key, models and prompts.
+
+    Global rather than per-project on purpose — every project on this install
+    talks to one endpoint with one key and one edit prompt, so a per-project
+    copy of this form could only ever disagree with itself.
+    """
+    return render_template("settings.html", **settings_context())
 
 
 @app.route("/settings/models", methods=["POST"])
@@ -252,7 +345,7 @@ def settings_models():
             if raw and not raw.isdigit():
                 flash(f"{label} must be a whole number, or blank to use .env",
                       "error")
-                return redirect(url_for("projects"))
+                return redirect(url_for("settings_page"))
             cfg[field] = raw
 
     if request.form.get("owui_api_key", "").strip():
@@ -262,11 +355,11 @@ def settings_models():
         save_config(cfg)
     except Exception as e:
         flash(f"Could not write {CONFIG_FILENAME}: {e}", "error")
-        return redirect(url_for("projects"))
+        return redirect(url_for("settings_page"))
 
     reload_model_config()
     flash("Settings saved", "success")
-    return redirect(url_for("projects"))
+    return redirect(url_for("settings_page"))
 
 
 @app.route("/projects/new", methods=["GET", "POST"])
@@ -286,7 +379,7 @@ def new_project():
                 flash(f"Project '{project_id}' linked to existing git repo", "success")
             else:
                 flash(f"Project '{project_id}' created", "success")
-            return redirect(url_for("dag", project_id=project_id))
+            return redirect(url_for("graph_view", project_id=project_id))
         except Exception as e:
             flash(str(e), "error")
     existing = []
@@ -301,10 +394,49 @@ def new_project():
 
 @app.route("/projects/<project_id>")
 @login_required
-def dag(project_id: str):
-    repo  = get_repo(project_id)
-    nodes = repo.get_dag()
-    return render_template("dag.html", project_id=project_id, dag_nodes=nodes)
+def project_home(project_id: str):
+    """The bare project URL: straight to Project Control.
+
+    This path used to render the commit DAG. The graph is what this app is
+    for, so the front door now opens on it — and every old link and redirect
+    that aimed at the DAG lands somewhere that exists.
+    """
+    return redirect(url_for("graph_view", project_id=project_id))
+
+
+@app.route("/projects/<project_id>/history")
+@login_required
+def history(project_id: str):
+    """The running history: every commit, newest first, with search.
+
+    A table rather than the node graph the old DAG page drew. The graph spent
+    a CDN dependency and a canvas on showing parentage that a list with
+    parents, branches and merge markers already conveys, and the list can be
+    searched and acted on.
+    """
+    repo    = get_repo(project_id)
+    commits = repo.get_commits()
+    return render_template("history.html",
+                           project_id=project_id,
+                           commits=commits)
+
+
+@app.route("/projects/<project_id>/history/search", methods=["POST"])
+@login_required
+def history_search(project_id: str):
+    """Semantic search over commit history.
+
+    Literal filtering happens in the browser over the list already on screen;
+    this is for what a filter cannot serve — remembering *when* something
+    happened, without knowing which words were in the message.
+    """
+    query = request.form.get("query", "").strip()
+    if not query:
+        return jsonify({"results": []})
+    try:
+        return jsonify({"results": search_commits(query, project_id=project_id)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/projects/<project_id>/commit/<commit_hash>")
@@ -356,7 +488,7 @@ def create_branch(project_id: str):
         flash(f"Branch '{name}' created from {from_commit[:8]}", "success")
     except Exception as e:
         flash(str(e), "error")
-    return redirect(url_for("dag", project_id=project_id))
+    return redirect(url_for("history", project_id=project_id))
 
 
 @app.route("/projects/<project_id>/checkout/<commit_hash>", methods=["POST"])
@@ -368,7 +500,7 @@ def checkout(project_id: str, commit_hash: str):
         flash(f"Checked out {commit_hash[:8]}", "success")
     except Exception as e:
         flash(str(e), "error")
-    return redirect(url_for("dag", project_id=project_id))
+    return redirect(url_for("history", project_id=project_id))
 
 # ── Search ────────────────────────────────────────────────────────────────
 
@@ -392,17 +524,20 @@ def search(project_id: str):
                            mode=mode,
                            results=results)
 
-# ── Chat ──────────────────────────────────────────────────────────────────
+# ── Plan ──────────────────────────────────────────────────────────────────
 #
-# The chat tab is a planning conversation: it runs on the *planner* model and
-# every message is sent with the same fresh context — recent git log, the
+# The Plan tab is this project's thinking space, and it is what the old Chat
+# tab became. It holds a conversation with the *planner* model and, on demand,
+# an assessment of where the work stands.
+#
+# Every message is sent with the same fresh context — recent git log, the
 # project README and the graph — plus the history of the conversation the user
 # is in. Conversations are stored per project under .residuality/chats/ (one
 # JSON file each) so they survive a restart, and a new conversation starts with
 # the injected context and nothing from any other conversation.
 
-CHAT_LOG_COMMITS  = 10   # how far back the injected git log reaches
-CHAT_HISTORY_LIMIT = 20  # exchanges of a conversation sent to the model
+PLAN_LOG_COMMITS   = 10  # how far back the injected git log reaches
+PLAN_HISTORY_LIMIT = 20  # exchanges of a conversation sent to the model
 
 
 def _chats_dir(repo: ArtifactRepo) -> Path:
@@ -458,7 +593,7 @@ def _chat_context_parts(repo: ArtifactRepo) -> list:
     try:
         log_lines = [
             f"- [{c['hash']}] {c['message']}"
-            for c in repo.log(limit=CHAT_LOG_COMMITS)
+            for c in repo.log(limit=PLAN_LOG_COMMITS)
         ]
         parts.append(f"## Recent Git Log\n" + "\n".join(log_lines or ["(no commits yet)"]))
     except Exception as e:
@@ -484,9 +619,10 @@ def _chat_context_parts(repo: ArtifactRepo) -> list:
     return parts
 
 
-@app.route("/projects/<project_id>/chat", methods=["GET"])
+@app.route("/projects/<project_id>/plan")
 @login_required
-def chat(project_id: str):
+def plan(project_id: str):
+    """The Plan page: this project's conversations, beside its assessment."""
     repo = get_repo(project_id)
     chat_id = request.args.get("chat", "").strip()
     if chat_id and not _chat_id_ok(chat_id):
@@ -523,37 +659,43 @@ def chat(project_id: str):
         _save_chat(repo, active)
         conversations = [_chat_entry(_chats_dir(repo) / f"{active['id']}.json")]
 
-    return render_template("chat.html",
+    return render_template("plan.html",
                            project_id=project_id,
                            conversations=conversations,
                            active=active,
                            planner_model=resolve_model(model_cfg, "planner"))
 
 
-@app.route("/projects/<project_id>/chat/new", methods=["POST"])
+@app.route("/projects/<project_id>/plan/new", methods=["POST"])
 @login_required
-def chat_new(project_id: str):
+def plan_new(project_id: str):
     repo = get_repo(project_id)
     chat = {"id": _new_chat_id(repo), "title": "New conversation", "history": []}
     _save_chat(repo, chat)
-    return redirect(url_for("chat", project_id=project_id, chat=chat["id"]))
+    return redirect(url_for("plan", project_id=project_id, chat=chat["id"]))
 
 
-@app.route("/projects/<project_id>/chat/delete", methods=["POST"])
+@app.route("/projects/<project_id>/plan/delete", methods=["POST"])
 @login_required
-def chat_delete(project_id: str):
+def plan_delete(project_id: str):
     repo = get_repo(project_id)
     chat_id = request.form.get("chat", "").strip()
     if chat_id and _chat_id_ok(chat_id):
         path = _chats_dir(repo) / f"{chat_id}.json"
         if path.exists():
             path.unlink()
-    return redirect(url_for("chat", project_id=project_id))
+    return redirect(url_for("plan", project_id=project_id))
 
 
-@app.route("/projects/<project_id>/chat", methods=["POST"])
+@app.route("/projects/<project_id>/plan/chat", methods=["POST"])
 @login_required
-def chat_send(project_id: str):
+def plan_send(project_id: str):
+    """One turn of a Plan conversation; the reply comes back as JSON.
+
+    Nothing is written to the project: the answer goes into the page, and any
+    change to a file still has to be made through the edit path. This endpoint
+    owns only the conversation JSON and the model call.
+    """
     repo         = get_repo(project_id)
     user_message = request.form.get("message", "").strip()
     chat_id      = request.form.get("chat", "").strip()
@@ -573,7 +715,7 @@ def chat_send(project_id: str):
     # Fresh context on every message; the conversation's own history on top.
     messages = [{"role": "system",
                  "content": "\n\n".join(_chat_context_parts(repo))}]
-    for exchange in history[-CHAT_HISTORY_LIMIT:]:
+    for exchange in history[-PLAN_HISTORY_LIMIT:]:
         messages.append({"role": "user",      "content": exchange["user"]})
         messages.append({"role": "assistant", "content": exchange["assistant"]})
     messages.append({"role": "user", "content": user_message})
@@ -589,12 +731,106 @@ def chat_send(project_id: str):
 
     return jsonify({"response": response, "title": chat["title"]})
 
+
+@app.route("/projects/<project_id>/plan/assess", methods=["POST"])
+@login_required
+def plan_assess(project_id: str):
+    """Ask the planner model where this project stands and what to do next.
+
+    Three inputs, assembled here rather than inside the client because this is
+    where the project's files are known: the latest snapshot (what the last
+    commits settled), the graph summary (what the code looks like now) and the
+    recent log. Each one degrades to None on its own — a project with nothing
+    indexed yet still gets an assessment from its README and history, and the
+    client says which parts were missing rather than failing the request.
+    """
+    repo     = get_repo(project_id)
+    dot_path = str(repo.repo_path / ".residuality" / "graph.dot")
+
+    snapshot = None
+    try:
+        latest = latest_snapshot(project_id)
+        if latest:
+            snapshot = format_snapshot_for_context(latest)
+    except Exception as e:
+        logger.warning(f"Plan: snapshot lookup failed for {project_id}: {e}")
+
+    graph_summary = None
+    try:
+        if Path(dot_path).exists():
+            graph_summary = render_graph_summary(dot_path)
+    except Exception as e:
+        logger.warning(f"Plan: graph summary failed for {project_id}: {e}")
+
+    try:
+        # The commit key is normalised to the shape generate_plan formats: the
+        # git log calls it `hash`, a commit record calls it `commit_hash`, and
+        # the prompt only needs one of them.
+        recent = [{"commit_hash": c["hash"], "message": c["message"]}
+                  for c in repo.log(limit=PLAN_LOG_COMMITS)]
+    except Exception as e:
+        logger.warning(f"Plan: git log failed for {project_id}: {e}")
+        recent = []
+
+    try:
+        plan = owui.generate_plan(
+            project_id=project_id,
+            snapshot=snapshot,
+            graph_summary=graph_summary,
+            recent_commits=recent,
+            model=resolve_model(model_cfg, "planner"),
+        )
+    except Exception as e:
+        logger.error(f"Plan assessment failed for {project_id}: {e}", exc_info=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
+
+    plan["context"] = {
+        "snapshot":      bool(snapshot),
+        "graph_summary": bool(graph_summary),
+        "commits":       len(recent),
+    }
+    return jsonify(plan)
+
 # ── Graph ─────────────────────────────────────────────────────────────────
 
-@app.route("/projects/<project_id>/graph")
+@app.route("/projects/<project_id>/graph", methods=["GET", "POST"])
 @login_required
 def graph_view(project_id: str):
-    repo        = get_repo(project_id)
+    """Project Control: the graph, the commit flow, and this repo's remote.
+
+    The git remote panel used to live on a per-project settings page. It lives
+    here now: the program-wide Settings page took that name, and a remote is a
+    property of *this* repository rather than of the install.
+    """
+    repo = get_repo(project_id)
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        try:
+            if action == "add_remote":
+                url  = request.form.get("remote_url", "").strip()
+                name = request.form.get("remote_name", "origin").strip() or "origin"
+                if url:
+                    repo.add_remote(url, name)
+                    flash(f"Remote '{name}' added", "success")
+            elif action == "remove_remote":
+                name = request.form.get("remote_name", "origin").strip()
+                repo.remove_remote(name)
+                flash(f"Remote '{name}' removed", "success")
+            elif action == "push":
+                remote = request.form.get("remote_name", "origin").strip()
+                branch = request.form.get("branch", "main").strip() or "main"
+                repo.push(remote, branch)
+                flash(f"Pushed to {remote}/{branch}", "success")
+            elif action == "pull":
+                remote = request.form.get("remote_name", "origin").strip()
+                branch = request.form.get("branch", "main").strip() or "main"
+                repo.pull(remote, branch)
+                flash(f"Pulled from {remote}/{branch}", "success")
+        except Exception as e:
+            flash(str(e), "error")
+        return redirect(url_for("graph_view", project_id=project_id))
+
     dot_path    = str(repo.repo_path / ".residuality" / "graph.dot")
     dot_content = repo.get_graph_dot()
     # Root of the drill-down view; `graph/svg` (flat file graph) is still
@@ -603,7 +839,8 @@ def graph_view(project_id: str):
     return render_template("graph.html",
                            project_id=project_id,
                            svg=svg,
-                           dot=dot_content)
+                           dot=dot_content,
+                           remotes=repo.get_remotes())
 
 
 @app.route("/projects/<project_id>/graph/svg")
@@ -975,14 +1212,11 @@ def graph_edit(project_id: str):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    state   = _conversation_state.get(project_id, {})
-    summary = state.get("summary")
-
     messages = ctx_builder.build_edit_context(
         node_content=node_content,
         node_id=node_id,
         instruction=instruction,
-        rolling_summary=summary,
+        rolling_summary=None,
         file_path=node["file"],
         line_start=node["line_start"],
         line_end=node["line_end"],
@@ -1194,7 +1428,6 @@ def graph_ai_edit(project_id: str):
                 f"unavailable ({list_error or 'empty'})"
             )}), 503
 
-    summary  = _conversation_state.get(project_id, {}).get("summary")
     many     = len(chunks) > 1
     replies  = []
     empty    = []
@@ -1206,7 +1439,7 @@ def graph_ai_edit(project_id: str):
             node_content="\n".join(lines[chunk_start - 1:chunk_end]),
             node_id=node_id or filepath,
             instruction=instruction,
-            rolling_summary=summary,
+            rolling_summary=None,
             file_path=filepath,
             line_start=chunk_start,
             line_end=chunk_end,
@@ -1303,10 +1536,10 @@ def merge(project_id: str):
             flash(f"Merged -> {commit_hash[:8]}", "success")
         except Exception as e:
             flash(str(e), "error")
-        return redirect(url_for("dag", project_id=project_id))
+        return redirect(url_for("history", project_id=project_id))
 
-    dag_nodes = repo.get_dag()
-    return render_template("merge.html", project_id=project_id, dag_nodes=dag_nodes)
+    commits = repo.get_commits()
+    return render_template("merge.html", project_id=project_id, commits=commits)
 
 # ── Export ────────────────────────────────────────────────────────────────
 
@@ -1324,51 +1557,6 @@ def export(project_id: str):
         return send_file(str(zip_path), as_attachment=True,
                          download_name=f"{project_id}_export.zip")
     return render_template("export.html", project_id=project_id)
-
-# ── Settings ──────────────────────────────────────────────────────────────
-
-@app.route("/projects/<project_id>/settings", methods=["GET", "POST"])
-@login_required
-def settings(project_id: str):
-    repo = get_repo(project_id)
-    if request.method == "POST":
-        action = request.form.get("action")
-        if action == "add_remote":
-            url  = request.form.get("remote_url", "").strip()
-            name = request.form.get("remote_name", "origin").strip()
-            if url:
-                try:
-                    repo.add_remote(url, name)
-                    flash(f"Remote '{name}' added", "success")
-                except Exception as e:
-                    flash(str(e), "error")
-        elif action == "push":
-            remote = request.form.get("remote_name", "origin").strip()
-            branch = request.form.get("branch", "main").strip()
-            try:
-                repo.push(remote, branch)
-                flash(f"Pushed to {remote}/{branch}", "success")
-            except Exception as e:
-                flash(str(e), "error")
-        elif action == "pull":
-            remote = request.form.get("remote_name", "origin").strip()
-            branch = request.form.get("branch", "main").strip()
-            try:
-                repo.pull(remote, branch)
-                flash(f"Pulled from {remote}/{branch}", "success")
-            except Exception as e:
-                flash(str(e), "error")
-        elif action == "remove_remote":
-            name = request.form.get("remote_name", "origin").strip()
-            try:
-                repo.remove_remote(name)
-                flash(f"Remote '{name}' removed", "success")
-            except Exception as e:
-                flash(str(e), "error")
-        return redirect(url_for("settings", project_id=project_id))
-
-    remotes = repo.get_remotes()
-    return render_template("settings.html", project_id=project_id, remotes=remotes)
 
 @app.route("/projects/<project_id>/graph/tree")
 @login_required
@@ -1553,12 +1741,6 @@ def graph_explorer(project_id: str):
 @login_required
 def api_projects():
     return jsonify(list_projects())
-
-
-@app.route("/api/projects/<project_id>/dag")
-@login_required
-def api_dag(project_id: str):
-    return jsonify(get_repo(project_id).get_dag())
 
 
 @app.route("/api/health")

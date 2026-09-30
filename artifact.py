@@ -187,7 +187,7 @@ def _html_asset_target(value: Optional[str]) -> Optional[str]:
       '/static/residuality.js'                          -> '/static/residuality.js'
       "{{ url_for('static', filename='vendor/r.js') }}" -> 'static/vendor/r.js'
       'https://cdn.example.com/x.js'                    -> unchanged (off-repo)
-      '#chat-log', '{{ url_for("chat") }}'              -> None (not a file)
+      '#chat-log', '{{ url_for("account") }}'           -> None (not a file)
 
     Values are handed on un-resolved: `graph.resolve_import` decides whether an
     off-repo URL becomes an external stub, so the same string the template
@@ -438,10 +438,15 @@ class ArtifactRepo:
         self.repo.git.checkout(commit)
         logger.info(f"Checked out {commit[:8]}")
 
-    # ── History / DAG ─────────────────────────────────────────────────────
+    # ── History ───────────────────────────────────────────────────────────
 
-    def get_dag(self) -> list:
-        """Return all commits as a list of nodes for DAG visualization."""
+    def get_commits(self) -> list:
+        """Return every commit on every branch, newest first.
+
+        One plain record per commit for the History page and the Merge table;
+        `parents`, `branches` and `is_merge` are what a reader needs to place a
+        commit without a drawn graph.
+        """
         commits = list(self.repo.iter_commits("--all"))
         nodes = []
         for c in commits:

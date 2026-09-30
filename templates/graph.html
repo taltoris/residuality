@@ -104,7 +104,6 @@
         <button class="btn" id="build-all-btn">&#9881; Build Graph</button>
         <a href="/projects/{{ project_id }}/graph/explorer" class="btn">&#x1F50D; Explorer</a>
         <button class="btn btn-primary" id="regen-btn">&#8635; Regenerate &amp; Commit</button>
-        <button class="btn" id="plan-btn">&#x1F9E0; Plan</button>
     </div>
 </div>
 
@@ -118,6 +117,70 @@
             <input type="text" id="new-ignore" placeholder="pattern e.g. *.json, build/" style="flex:1;margin:0;">
             <button class="btn" id="add-ignore-btn">Add</button>
         </div>
+    </div>
+</details>
+
+<details style="margin-bottom:1rem;">
+    <summary style="cursor:pointer;color:#8b949e;font-size:0.9rem;padding:0.5rem 0;">&#9654; git remote</summary>
+    {# Per project, unlike Settings: a remote belongs to this repository, not to
+       the install. This is the panel that used to be its own page at
+       /projects/<id>/settings, before that URL's name went program-wide. #}
+    <div class="card" style="margin-top:0.5rem;">
+        {% if remotes %}
+        <table style="margin-bottom:1rem;">
+            <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
+            <tbody>
+            {% for r in remotes %}
+            <tr>
+                <td>{{ r.name }}</td>
+                <td style="font-size:0.82rem;color:#8b949e;">{{ r.url }}</td>
+                <td>
+                    <form method="post" style="display:inline;">
+                        <input type="hidden" name="action" value="remove_remote">
+                        <input type="hidden" name="remote_name" value="{{ r.name }}">
+                        <button type="submit" class="btn btn-danger"
+                                onclick="return confirm('Remove remote {{ r.name }}?')">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+
+        <form method="post" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin-bottom:1rem;">
+            <div style="flex:1;min-width:120px;">
+                <label>Remote</label>
+                <select name="remote_name" style="margin:0;">
+                    {% for r in remotes %}<option>{{ r.name }}</option>{% endfor %}
+                </select>
+            </div>
+            <div style="flex:1;min-width:120px;">
+                <label>Branch</label>
+                <input type="text" name="branch" value="main" style="margin:0;">
+            </div>
+            <div style="display:flex;gap:0.5rem;">
+                <button type="submit" name="action" value="push" class="btn btn-primary">Push</button>
+                <button type="submit" name="action" value="pull" class="btn">Pull</button>
+            </div>
+        </form>
+        {% else %}
+        <p style="font-size:0.85rem;color:#8b949e;margin-bottom:0.75rem;">
+            No remote configured. Optional — the local workflow is complete without one.
+        </p>
+        {% endif %}
+
+        <form method="post">
+            <input type="hidden" name="action" value="add_remote">
+            <label>Remote URL</label>
+            <input type="text" name="remote_url" placeholder="https://github.com/user/repo.git">
+            <label>Remote name</label>
+            <input type="text" name="remote_name" placeholder="origin" value="origin">
+            <button type="submit" class="btn btn-primary">Add remote</button>
+        </form>
+        <p style="font-size:0.78rem;color:#8b949e;margin-top:0.5rem;">
+            HTTPS auth uses <code>GITHUB_TOKEN</code> env var.
+            SSH uses mounted <code>~/.ssh</code> keys.
+        </p>
     </div>
 </details>
 
@@ -201,7 +264,6 @@
         </footer>
     </div>
 </div>
-<div id="plan-output"></div>
 <details style="margin-top:1rem;">
     <summary style="cursor:pointer;color:#8b949e;font-size:0.85rem;">Raw dot source</summary>
     <pre style="margin-top:0.5rem;">{{ dot }}</pre>
@@ -341,36 +403,6 @@
                 btn.disabled    = false;
                 btn.textContent = 'Regenerate & Commit';
             });
-    });
-   document.getElementById('plan-btn').addEventListener('click', function() {
-    var btn = this;
-    var status = document.getElementById('regen-status');
-    btn.disabled = true;
-    btn.textContent = 'Thinking...';
-    setStatus(status, 'Asking Sage to assess project state...', '#8b949e');
-
-    fetch('/projects/' + PID + '/plan', {method: 'POST'})
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            btn.disabled = false;
-            btn.textContent = 'Plan';
-            status.style.display = 'none';
-            document.getElementById('plan-output').innerHTML =
-                '<div class="card" style="margin-top:1rem;">' +
-                '<h2 style="margin-bottom:0.75rem;">&#x1F9E0; Sage\'s Assessment</h2>' +
-                '<p><strong>Assessment:</strong> ' + data.assessment + '</p>' +
-                '<p><strong>Next task:</strong> ' + data.next_task + '</p>' +
-                '<p><strong>Approach:</strong> ' + data.approach + '</p>' +
-                (data.files_to_touch.length ? '<p><strong>Files:</strong> ' + data.files_to_touch.join(', ') + '</p>' : '') +
-                (data.risks ? '<p><strong>Risks:</strong> ' + data.risks + '</p>' : '') +
-                (data.open_questions.length ? '<p><strong>Open questions:</strong> ' + data.open_questions.join('; ') + '</p>' : '') +
-                '</div>';
-          })
-        .catch(function(e) {
-            btn.disabled = false;
-            btn.textContent = 'Plan';
-            setStatus(status, 'Plan error: ' + e, '#f85149');
-        });
     });
     function generateMsg() {
         var inp = document.getElementById('commit-message');

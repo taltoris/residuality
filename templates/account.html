@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Account — Residuality{% endblock %}
+{% block content %}
+<h1>Account</h1>
+
+{# The credentials live in the environment rather than in the app's config
+   file, so this page reports the account instead of editing it. A password
+   box here would have to write a second copy of a secret that .env owns, and
+   the two would then disagree the next time the container restarted. #}
+<div class="card" style="max-width:520px;">
+    <p style="font-size:0.8rem;color:#8b949e;margin-bottom:0.2rem;">Signed in as</p>
+    <p style="font-family:monospace;color:#58a6ff;font-size:1.1rem;margin-bottom:1rem;">{{ username }}</p>
+
+    <p style="font-size:0.82rem;color:#8b949e;line-height:1.55;margin-bottom:1rem;">
+        The username and password come from <code>RESIDUALITY_USERNAME</code> and
+        <code>RESIDUALITY_PASSWORD</code> in the environment. To change them, edit
+        the env file and restart the container.
+    </p>
+
+    <a href="{{ url_for('logout') }}" class="btn btn-danger">Log out</a>
+</div>
+{% endblock %}

@@ -377,12 +377,12 @@ def render_graph_summary(dot_path: str) -> str:
 
     Built by *re-rendering* the graph rather than by filtering graph.dot.
     graph.dot is 192 KB / ~48K tokens on this repo; injected whole into every
-    chat message it spent most of a conversation's budget before the first
+    Plan message it spent most of a conversation's budget before the first
     question was asked, and 52% of its bytes were two vendored React bundles.
     Three properties make the outline cheap:
 
       * `contains` edges are pure restatement. A node id already carries its
-        own path, so `app.py::chat_send` says whose it is with no edge at all.
+        own path, so `app.py::plan_send` says whose it is with no edge at all.
         702 of the 781 edges here are these.
       * `imports` edges are already module-level names -- `os`, `flask`,
         `artifact` -- not node ids, so they need no resolving.
@@ -423,7 +423,7 @@ def render_graph_summary(dot_path: str) -> str:
         A prose section's slug is arbitrary (`README.md::s3`), so its label
         ("The cellar door") is the readable name. Everywhere else the segment
         is the real name and already says more than the label would --
-        `div#chat-layout` beats "chat-layout".
+        `div#plan-layout` beats "plan-layout".
         """
         suffix = node_id.split("::")[-1] if "::" in node_id else node_id
         if re.fullmatch(r"s\d+", suffix) and label_by_id.get(node_id):

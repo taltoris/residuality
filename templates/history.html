@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}History — {{ project_id }} — Residuality{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
+    <h1>History — {{ project_id }}</h1>
+    <span style="font-size:0.8rem;color:#8b949e;">
+        {{ commits | length }} commit{{ '' if commits | length == 1 else 's' }}
+    </span>
+</div>
+
+{# The running list is the point, so it stays on screen; both kinds of search
+   sit above it and either one narrows the same set. The filter is literal and
+   instant. "Search by meaning" is the indexed one, for remembering *when*
+   something happened without knowing which words went in the message. #}
+<div class="card">
+    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+        <input type="text" id="hist-filter" autofocus
+               placeholder="filter the list — hash, message, branch..."
+               style="flex:1;min-width:200px;margin:0;">
+        <button class="btn" id="hist-meaning-btn"
+                title="Search by what a commit was about rather than by its words">Search by meaning</button>
+        <span id="hist-status" style="font-size:0.75rem;color:#8b949e;"></span>
+    </div>
+    <div id="hist-results"></div>
+</div>
+
+<div class="card">
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;flex-wrap:wrap;">
+        <button class="btn" id="compare-btn" disabled>Diff A &rarr; B</button>
+        <span style="font-size:0.75rem;color:#8b949e;">Tick two rows to compare them.</span>
+    </div>
+    <table id="hist-table">
+        <thead>
+            <tr>
+                <th title="Pick the left side of a diff">A</th>
+                <th title="Pick the right side of a diff">B</th>
+                <th>Commit</th>
+                <th>Message</th>
+                <th>Branches</th>
+                <th>Parents</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="hist-body">
+        {% for c in commits %}
+            <tr data-text="{{ (c.short ~ ' ' ~ c.hash ~ ' ' ~ c.message ~ ' ' ~ (c.branches | join(' ')) ~ ' ' ~ (c.parents | join(' '))) | lower }}">
+                <td><input type="radio" name="cmp-a" value="{{ c.hash }}"></td>
+                <td><input type="radio" name="cmp-b" value="{{ c.hash }}"></td>
+                <td class="hist-hash" data-hash="{{ c.hash }}" title="Click to copy the full hash"
+                    style="font-family:monospace;color:#58a6ff;cursor:pointer;">{{ c.short }}</td>
+                <td>{{ c.message }}{% if c.is_merge %} <span class="tag merge">merge</span>{% endif %}</td>
+                <td>{% for b in c.branches %}<span class="tag">{{ b }}</span>{% endfor %}</td>
+                <td style="font-family:monospace;font-size:0.75rem;color:#8b949e;">
+                    {{ c.parents | join(', ') or 'root' }}
+                </td>
+                <td style="white-space:nowrap;">
+                    <a href="/projects/{{ project_id }}/commit/{{ c.hash }}" class="btn">Files</a>
+                    <button class="btn hist-branch" data-hash="{{ c.hash }}">Branch</button>
+                    <form method="post" style="display:inline;"
+                          action="/projects/{{ project_id }}/checkout/{{ c.hash }}"
+                          onsubmit="return confirm('Check out {{ c.short }}? This changes the working tree.');">
+                        <button type="submit" class="btn btn-danger">Checkout</button>
+                    </form>
+                </td>
+            </tr>
+        {% else %}
+            <tr><td colspan="7" style="color:#8b949e;">No commits yet.</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card" id="branch-card" style="display:none;max-width:560px;">
+    <h2>Branch from <span id="branch-from" style="font-family:monospace;color:#58a6ff;"></span></h2>
+    <form method="post" action="{{ url_for('create_branch', project_id=project_id) }}">
+        <input type="hidden" name="from_commit" id="branch-from-commit">
+        <label>Branch name</label>
+        <input type="text" name="name" placeholder="new-feature" required>
+        <label>Reason <span style="color:#484f58;">(optional)</span></label>
+        <input type="text" name="reason" placeholder="why this branch exists">
+        <div style="display:flex;gap:0.5rem;">
+            <button type="submit" class="btn btn-primary">Create branch</button>
+            <button type="button" class="btn" id="branch-cancel">Cancel</button>
+        </div>
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/residuality.js"></script>
+<script>const PROJECT_ID = {{ project_id | tojson }};</script>
+<script>
+(function() {
+    var filter = document.getElementById('hist-filter');
+    var status = document.getElementById('hist-status');
+    var rows   = Array.prototype.slice.call(
+        document.querySelectorAll('#hist-body tr[data-text]')
+    );
+
+    // ── Literal filter ────────────────────────────────────────────────────
+    // Runs over the rows already rendered, so it costs nothing to type into
+    // and works with the model server switched off.
+    filter.addEventListener('input', function() {
+        var q = this.value.trim().toLowerCase();
+        var shown = 0;
+        rows.forEach(function(r) {
+            var hit = !q || r.dataset.text.indexOf(q) !== -1;
+            r.style.display = hit ? '' : 'none';
+            if (hit) shown++;
+        });
+        if (!q) { status.textContent = ''; return; }
+        status.textContent = shown + ' of ' + rows.length + ' match';
+    });
+
+    // ── Semantic search ───────────────────────────────────────────────────
+    var meaningBtn = document.getElementById('hist-meaning-btn');
+    var results    = document.getElementById('hist-results');
+
+    meaningBtn.addEventListener('click', function() {
+        var q = filter.value.trim();
+        if (!q) {
+            status.textContent = 'type what you are looking for first';
+            return;
+        }
+        meaningBtn.disabled = true;
+        status.textContent   = 'searching…';
+        var fd = new FormData();
+        fd.append('query', q);
+        fetch('/projects/' + PROJECT_ID + '/history/search', { method: 'POST', body: fd })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                meaningBtn.disabled = false;
+                status.textContent  = '';
+                if (d.error) {
+                    results.innerHTML = '<p style="color:#f85149;font-size:0.85rem;">' +
+                        escapeHtml(d.error) + '</p>';
+                    return;
+                }
+                var hits = d.results || [];
+                if (!hits.length) {
+                    results.innerHTML = '<p style="color:#8b949e;font-size:0.85rem;">' +
+                        'Nothing in the commit history matches that.</p>';
+                    return;
+                }
+                results.innerHTML = '<table><thead><tr><th>Score</th><th>Commit</th>' +
+                    '<th>Message</th><th></th></tr></thead><tbody>' +
+                    hits.map(function(h) {
+                        var hash = h.commit_hash || '';
+                        return '<tr><td style="color:#8b949e;font-size:0.8rem;">' +
+                            (h.score == null ? '' : h.score) + '</td>' +
+                            '<td style="font-family:monospace;color:#58a6ff;">' +
+                            escapeHtml(hash.slice(0, 8)) + '</td>' +
+                            '<td>' + escapeHtml(h.message || '') + '</td>' +
+                            '<td><a class="btn" href="/projects/' + PROJECT_ID +
+                            '/commit/' + encodeURIComponent(hash) + '">View</a></td></tr>';
+                    }).join('') + '</tbody></table>';
+            })
+            .catch(function(e) {
+                meaningBtn.disabled = false;
+                status.textContent  = '';
+                results.innerHTML   = '<p style="color:#f85149;font-size:0.85rem;">' +
+                    'Search failed: ' + escapeHtml(String(e)) + '</p>';
+            });
+    });
+
+    // ── Compare two commits ───────────────────────────────────────────────
+    var compareBtn = document.getElementById('compare-btn');
+
+    function checked(name) {
+        return document.querySelector('input[name="' + name + '"]:checked');
+    }
+    function refreshCompare() {
+        var a = checked('cmp-a'), b = checked('cmp-b');
+        compareBtn.disabled = !(a && b && a.value !== b.value);
+    }
+    document.querySelectorAll('input[name="cmp-a"], input[name="cmp-b"]')
+        .forEach(function(r) { r.addEventListener('change', refreshCompare); });
+
+    compareBtn.addEventListener('click', function() {
+        var a = checked('cmp-a'), b = checked('cmp-b');
+        if (!a || !b) return;
+        window.location.href = '/projects/' + PROJECT_ID +
+                               '/diff/' + a.value + '/' + b.value;
+    });
+
+    // ── Per-commit actions ────────────────────────────────────────────────
+    document.querySelectorAll('.hist-hash').forEach(function(el) {
+        el.addEventListener('click', function() {
+            navigator.clipboard.writeText(this.dataset.hash).catch(function() {});
+            status.textContent = 'copied ' + this.dataset.hash.slice(0, 8);
+        });
+    });
+
+    var branchCard = document.getElementById('branch-card');
+    document.querySelectorAll('.hist-branch').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            document.getElementById('branch-from-commit').value = this.dataset.hash;
+            document.getElementById('branch-from').textContent =
+                this.dataset.hash.slice(0, 8);
+            branchCard.style.display = 'block';
+            branchCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+    });
+    document.getElementById('branch-cancel').addEventListener('click', function() {
+        branchCard.style.display = 'none';
+    });
+})();
+</script>
+{% endblock %}

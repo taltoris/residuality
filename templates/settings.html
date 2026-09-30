@@ -1,72 +1,193 @@
 {% extends "base.html" %}
-{% block title %}Settings — {{ project_id }} — Residuality{% endblock %}
+{% block title %}Settings — Residuality{% endblock %}
 {% block content %}
-<h1>Settings — {{ project_id }}</h1>
+<h1>Settings</h1>
 
-<div class="card" style="max-width:560px;">
-    <h2>Git Remote <span style="color:#8b949e; font-size:0.8rem;">(optional)</span></h2>
-    <p style="font-size:0.82rem; color:#8b949e; margin-bottom:0.75rem;">
-        Link this project to GitHub, GitLab, or any git remote.
-        Not required — local workflow is complete without it.
+{# Program-wide, not per project. One endpoint, one key, one edit prompt and
+   one context window serve every project on this install, so this form has no
+   project in its URL and no project in its meaning. The git remote -- which
+   genuinely is per project -- sits on that project's Project Control page. #}
+<div class="card">
+    <p style="font-size:0.8rem;color:#8b949e;margin-bottom:0.75rem;">
+        In force now —
+        <span style="color:#58a6ff;font-family:monospace;">default: {{ model_cfg.get('default','') }}</span>
+        {% if resolved_edit != model_cfg.get('default','') %}
+            <span style="color:#8b949e;">· edit: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_edit }}</span>
+        {% endif %}
+        {% if resolved_chat != model_cfg.get('default','') %}
+            <span style="color:#8b949e;">· chat: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_chat }}</span>
+        {% endif %}
     </p>
 
-    {% if remotes %}
-    <table style="margin-bottom:1rem;">
-        <thead><tr><th>Name</th><th>URL</th><th></th></tr></thead>
-        <tbody>
-        {% for r in remotes %}
-        <tr>
-            <td>{{ r.name }}</td>
-            <td style="font-size:0.82rem; color:#8b949e;">{{ r.url }}</td>
-            <td>
-                <form method="post" style="display:inline;">
-                    <input type="hidden" name="action" value="remove_remote">
-                    <input type="hidden" name="remote_name" value="{{ r.name }}">
-                    <button type="submit" class="btn btn-danger"
-                            onclick="return confirm('Remove remote {{ r.name }}?')">Remove</button>
-                </form>
-            </td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    {% else %}
-    <p style="color:#8b949e; font-size:0.85rem; margin-bottom:1rem;">No remotes configured.</p>
-    {% endif %}
+    <form method="POST" action="{{ url_for('settings_models') }}">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;">
+            <div>
+                <label for="s-default">Default model <span style="color:#484f58;">(chat + edits)</span></label>
+                <select id="s-default" name="default">
+                    <option value="{{ model_cfg.get('default','') }}" selected>{{ model_cfg.get('default','') or 'from .env' }}</option>
+                </select>
+            </div>
+            <div>
+                <label for="s-chat">Chat override</label>
+                <select id="s-chat" name="chat">
+                    <option value="{{ model_cfg.get('chat','') }}" selected>{{ model_cfg.get('chat','') or 'follow the default' }}</option>
+                </select>
+            </div>
+            <div>
+                <label for="s-edit">Edit override</label>
+                <select id="s-edit" name="edit">
+                    <option value="{{ model_cfg.get('edit','') }}" selected>{{ model_cfg.get('edit','') or 'follow the default' }}</option>
+                </select>
+            </div>
+            <div>
+                <label for="s-url">Endpoint <span style="color:#484f58;">(OpenAI-compatible)</span></label>
+                <input id="s-url" name="owui_url"
+                       value="{{ model_cfg.get('owui_url','') }}" placeholder="http://host:8282">
+            </div>
+            <div>
+                <label for="s-key">API key</label>
+                <input id="s-key" name="owui_api_key" type="password" value=""
+                       autocomplete="new-password"
+                       placeholder="{{ '•••••• stored — blank keeps it' if api_key_set else 'not set' }}">
+            </div>
+            <div>
+                <label for="s-ctx">Context window <span style="color:#484f58;">(tokens)</span></label>
+                <input id="s-ctx" name="context_tokens" type="number"
+                       min="1" step="1024"
+                       value="{{ model_cfg.get('context_tokens','') }}"
+                       placeholder="{{ context_tokens_default }}">
+                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
+                    How much the model holds at once. One edit may send about half the
+                    window, in characters — the replacement comes back about as long as the
+                    range it replaces, and both have to fit.
+                </p>
+            </div>
+            <div>
+                <label for="s-maxchars">Max characters per edit <span style="color:#484f58;">(blank
+                    = from the window, 0 = no limit)</span></label>
+                <input id="s-maxchars" name="max_edit_chars" type="number"
+                       min="0" step="1000"
+                       value="{{ model_cfg.get('max_edit_chars','') }}"
+                       placeholder="{{ resolved_max_edit_chars }}">
+                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
+                    In force now: <strong>{{ "{:,}".format(resolved_max_edit_chars) }}</strong>
+                    characters per call. A longer range is split on the graph's node
+                    boundaries and sent as several calls, so this is a per-call ceiling,
+                    not a cap on how much can be edited.
+                </p>
+            </div>
+        </div>
 
-    <form method="post">
-        <input type="hidden" name="action" value="add_remote">
-        <label>Remote URL</label>
-        <input type="text" name="remote_url"  placeholder="https://github.com/user/repo.git">
-        <label>Remote Name</label>
-        <input type="text" name="remote_name" placeholder="origin" value="origin">
-        <button type="submit" class="btn btn-primary">Add Remote</button>
+        <div style="margin-top:0.75rem;">
+            <label for="s-prompt">Prompt for AI edits</label>
+            <textarea id="s-prompt" name="edit_prompt" rows="3" spellcheck="false">{{ model_cfg.get('edit_prompt','') }}</textarea>
+            <p style="font-size:0.75rem;color:#8b949e;">
+                Sent as the system prompt. The lines on screen and your description go in the user
+                message, so this only has to say what shape the answer should come back in.
+                <a href="#" id="s-prompt-reset" data-default="{{ edit_prompt_default }}"
+                   style="color:#58a6ff;">reset to default</a>
+            </p>
+        </div>
+
+        <details style="margin-top:0.5rem;">
+            <summary style="cursor:pointer;font-size:0.8rem;color:#8b949e;">Advanced roles</summary>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;margin-top:0.5rem;">
+                <div>
+                    <label for="s-planner">Planner model <span style="color:#484f58;">(Plan conversations + assessments)</span></label>
+                    <select id="s-planner" name="planner">
+                        <option value="{{ model_cfg.get('planner','') }}" selected>{{ model_cfg.get('planner','') or 'follow the default' }}</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="s-summarizer">Summarizer model <span style="color:#484f58;">(commits, summaries)</span></label>
+                    <select id="s-summarizer" name="summarizer">
+                        <option value="{{ model_cfg.get('summarizer','') }}" selected>{{ model_cfg.get('summarizer','') or 'follow the default' }}</option>
+                    </select>
+                </div>
+            </div>
+        </details>
+
+        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;">
+            <button class="btn btn-primary" type="submit">Save settings</button>
+            <button class="btn" type="button" id="s-reload">Reload models</button>
+            <span id="s-model-status" style="font-size:0.75rem;color:#8b949e;"></span>
+        </div>
+
+        <p style="font-size:0.75rem;color:#8b949e;margin-top:0.5rem;">
+            Saved to <code>{{ config_file }}</code>. These values override <code>.env</code>,
+            so blanking a field hands it back to the environment. The model list is whatever
+            the configured API key can see — that is also what an edit is checked against
+            before it is sent.
+        </p>
     </form>
 </div>
+{% endblock %}
 
-{% if remotes %}
-<div class="card" style="max-width:560px; margin-top:1rem;">
-    <h2>Push / Pull</h2>
-    <form method="post" style="display:flex; gap:0.5rem; align-items:flex-end; flex-wrap:wrap;">
-        <div style="flex:1; min-width:120px;">
-            <label>Remote</label>
-            <select name="remote_name" style="margin:0;">
-                {% for r in remotes %}<option>{{ r.name }}</option>{% endfor %}
-            </select>
-        </div>
-        <div style="flex:1; min-width:120px;">
-            <label>Branch</label>
-            <input type="text" name="branch" value="main" style="margin:0;">
-        </div>
-        <div style="display:flex; gap:0.5rem;">
-            <button type="submit" name="action" value="push" class="btn btn-primary">Push</button>
-            <button type="submit" name="action" value="pull" class="btn">Pull</button>
-        </div>
-    </form>
-    <p style="font-size:0.78rem; color:#8b949e; margin-top:0.5rem;">
-        HTTPS auth uses <code>GITHUB_TOKEN</code> env var.
-        SSH uses mounted <code>~/.ssh</code> keys.
-    </p>
-</div>
-{% endif %}
+{% block scripts %}
+<script>
+// The model list comes from the endpoint after the page renders, so this page
+// never blocks on OWUI, and a dead endpoint leaves the saved value in each
+// dropdown with an explanation rather than an empty control.
+(function() {
+    var status = document.getElementById('s-model-status');
+    var SLOTS  = ['s-default', 's-chat', 's-edit', 's-planner', 's-summarizer'];
+
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    // A dropdown per slot, blank first because blank is a real value here: it
+    // hands the slot back to the default or to .env. Each slot is rendered with
+    // its saved value already in it, so if this fetch never lands the form still
+    // posts what was stored rather than posting nothing at all.
+    function fill(id, models) {
+        var sel     = document.getElementById(id);
+        var current = sel.value;
+        var html    = '<option value="">(blank - follow the default / .env)</option>';
+        var seen    = false;
+        models.forEach(function(m) {
+            if (m.id === current) seen = true;
+            html += '<option value="' + esc(m.id) + '">' + esc(m.name || m.id) + '</option>';
+        });
+        if (current && !seen) {
+            html += '<option value="' + esc(current) + '">' + esc(current) +
+                    ' - not offered by this key</option>';
+        }
+        sel.innerHTML = html;
+        sel.value = current;
+    }
+
+    function load(force) {
+        status.textContent = 'loading models…';
+        status.style.color = '#8b949e';
+        fetch('/api/models' + (force ? '?refresh=1' : ''))
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                var models = d.models || [];
+                SLOTS.forEach(function(id) { fill(id, models); });
+                if (d.error) {
+                    status.textContent = 'models unavailable — ' + d.error;
+                    status.style.color = '#d29922';
+                } else {
+                    status.textContent = models.length + ' models at ' + d.endpoint;
+                    status.style.color = '#8b949e';
+                }
+            })
+            .catch(function(e) {
+                status.textContent = 'could not reach the app: ' + e;
+                status.style.color = '#f85149';
+            });
+    }
+
+    document.getElementById('s-reload').addEventListener('click', function() { load(true); });
+    document.getElementById('s-prompt-reset').addEventListener('click', function(e) {
+        e.preventDefault();
+        document.getElementById('s-prompt').value = this.dataset.default;
+    });
+
+    load(false);
+})();
+</script>
 {% endblock %}

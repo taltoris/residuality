@@ -32,7 +32,8 @@
             font-size: 0.9rem;
         }
         nav a:hover { color: #c9d1d9; }
-        nav .right { margin-left: auto; }
+        nav .right { margin-left: auto; display: flex; gap: 1rem; }
+        nav .here { color: #c9d1d9; }
         .container {
             max-width: 1200px;
             margin: 0 auto;
@@ -111,19 +112,30 @@
     {% block head %}{% endblock %}
 </head>
 <body>
+{# Two kinds of link live up here, and they are kept apart on purpose.
+
+   Left of the gap: things that act on ONE project. They are only rendered
+   when the page is inside a project, because they have nothing to say from
+   the project list -- Plan has no conversations, History has no commits and
+   Merge has nothing to merge without a repository to point at.
+
+   Right of the gap: things that act on the INSTALL. Settings (models,
+   endpoint, key, edit prompt) and Account are the same everywhere, so they
+   stay put whatever page you are on, including the project list where there
+   is no project at all. #}
 <nav>
     <a href="{{ url_for('projects') }}" class="brand">⛏ Residuality</a>
     {% if project_id is defined and project_id %}
-        <a href="{{ url_for('dag',      project_id=project_id) }}">DAG</a>
-        <a href="{{ url_for('chat',     project_id=project_id) }}">Chat</a>
+        <a href="{{ url_for('plan',       project_id=project_id) }}">Plan</a>
         <a href="{{ url_for('graph_view', project_id=project_id) }}">Project Control</a>
-        <a href="{{ url_for('search',   project_id=project_id) }}">Search</a>
-        <a href="{{ url_for('merge',    project_id=project_id) }}">Merge</a>
-        <a href="{{ url_for('export',   project_id=project_id) }}">Export</a>
-        <a href="{{ url_for('settings', project_id=project_id) }}">Settings</a>
+        <a href="{{ url_for('history',    project_id=project_id) }}">History</a>
+        <a href="{{ url_for('search',     project_id=project_id) }}">Search</a>
+        <a href="{{ url_for('merge',      project_id=project_id) }}">Merge</a>
+        <a href="{{ url_for('export',     project_id=project_id) }}">Export</a>
     {% endif %}
     <span class="right">
-        <a href="{{ url_for('logout') }}">Logout</a>
+        <a href="{{ url_for('settings_page') }}">Settings</a>
+        <a href="{{ url_for('account') }}">Account</a>
     </span>
 </nav>
 <div class="container">

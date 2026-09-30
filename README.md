@@ -16,8 +16,24 @@ store). Nothing leaves your machine.
 | **Artifact store** | Every project is a real git repo under `/repos/<project_id>`. `read`, `write`, `branch`, `merge`, `checkout`, `diff` — all backed by GitPython. |
 | **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts`, `.rs` and `.html`/`.htm` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions, template sections and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
 | **Memory** | Each commit indexes its message and its graph nodes into Qdrant, and generates an *episodic snapshot* (state, decisions, open questions) that is also vectorised. |
-| **Chat** | Chat is scoped to a project and runs on the *planner* model. Every message is sent with fresh context — the recent git log, `README.md` and an outline of `graph.dot` — plus the history of the conversation you are in. Conversations are stored per project and listed in a sidebar; a new one starts with the injected context and nothing from any other conversation. |
+| **Plan** | The project's thinking space, and what the old Chat tab became. It holds a conversation on the *planner* model — every message sent with fresh context: the recent git log, `README.md` and an outline of `graph.dot`, plus the history of the conversation you are in — and, on demand, an **assessment**: that same context put to the model as a question about where things stand and what to do next. |
+| **History** | Every commit on every branch, newest first, with parents, branches and merge markers. A literal filter narrows the list as you type; *Search by meaning* uses the vector index for when you remember the shape of a change but not its wording. From a row you can view a commit's files, branch from it, or check it out; tick two rows to diff them. |
 | **Merge** | Pick two divergent commits; the model reconciles conflicting files into a merge commit with two parents. |
+
+### Navigation
+
+The bar is split by scope, not by importance.
+
+- **Program-wide** (right of the gap, always rendered): **Settings** — the model slots, the
+  endpoint, the API key, the edit prompt and the context window — and **Account**, which
+  reports the signed-in user and holds **Log out**. These mean the same thing on every page,
+  including the project list, where there is no project at all.
+- **Project-scoped** (left of the gap, rendered only inside a project): **Plan**, **Project
+  Control**, **History**, **Search**, **Merge**, **Export**. They are absent from the project
+  list because they have nothing to point at there.
+
+The git remote moved the other way: a remote belongs to one repository, so its panel lives on
+that project's Project Control page rather than under the program-wide Settings link.
 
 ---
 
@@ -44,7 +60,7 @@ store). Nothing leaves your machine.
 ### Layout
 
 ```
-/app/app.py              # routes, auth, chat, graph, merge, export
+/app/app.py              # routes, auth, plan, graph, history, merge, export
 /app/artifact.py         # Git-backed artifact store + graph updates
 /app/graph.py            # DOT parsing, SVG rendering, prose export
 /app/indexer.py          # Qdrant upsert/search (commits + graph nodes)
@@ -53,7 +69,7 @@ store). Nothing leaves your machine.
 /app/owui_client.py      # Open WebUI API client
 /app/.residuality/extract-python.scm   # tree-sitter query for Python
 /templates/*.html        # Jinja UI
-/static/residuality.js   # graph drill-down, gitignore, chat, file lists
+/static/residuality.js   # graph drill-down, gitignore, plan, file lists
 ```
 
 ---
@@ -80,6 +96,63 @@ r._update_graph('src/main.py')
 "
 ```
 
+### Behind a reverse proxy (Nginx Proxy Manager)
+
+The container serves plain HTTP on 5010; the proxy terminates TLS and forwards to it.
+
+**Proxy host**
+
+| Field | Value |
+|---|---|
+| Domain Names | `res.mywebsite.com` |
+| Scheme | `http` |
+| Forward Hostname / IP | the Docker host's LAN address (the port is published), or the container name if NPM shares its Docker network |
+| Forward Port | `5010` |
+| Access List | *Public* — a set Access List answers the whole host with 403 |
+| Block Common Exploits | **off** if the login redirect 403s — see below |
+
+Do not point Forward Hostname at `localhost` from inside the NPM container: that is
+NPM's own loopback, not the host's. Use the LAN IP, or attach both containers to one
+network and use `residuality`.
+
+**SSL** — attach a certificate and turn on Force SSL. **Advanced** — NPM already sets
+`Host`, `X-Real-IP` and `X-Forwarded-For`; add the scheme so Flask can tell it is on
+HTTPS:
+
+```nginx
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host  $host;
+client_max_body_size 512m;   # export zips and large commits
+proxy_buffering off;         # a Plan assessment can take a while
+```
+
+**Why the app needed changing too.** Under plain WSGI Flask sees only the socket:
+HTTP, `127.0.0.1:5010`. It built the post-login redirect from `request.url`, which is
+always absolute, so an unauthenticated hit produced
+`/login?next=https://res.mywebsite.com/`. That is the exact shape of an open-redirect
+payload, and a proxy or WAF rule matching that shape (NPM's *Block Common Exploits* is
+the usual one) answers **403** itself, before Flask is ever reached. Hence:
+
+- **`ProxyFix`** — the app now believes `X-Forwarded-Proto` / `-Host`, so it knows it
+  is on HTTPS at the public name. Disable with `TRUST_PROXY=false` if nothing proxies.
+- **`next` is a bare path** — the redirect is `/login?next=/`, which is both correct
+  (it survives the host changing) and not something a WAF objects to. The value is
+  validated on the way back in, so the login page is no longer an open redirect.
+- **`SESSION_COOKIE_HTTPONLY` / `SAMESITE`** are set, and `SESSION_COOKIE_SECURE` is
+  available for a TLS-only deployment — off by default so the direct port-5010 URL can
+  still sign in.
+
+To confirm which layer is answering 403, compare the two:
+
+```bash
+curl -sI "https://res.mywebsite.com/login?next=/"                     # expect 200
+curl -sI "https://res.mywebsite.com/login?next=https://res.mywebsite.com/"   # 403 = a rule in front
+curl -sI "http://<docker-host>:5010/login?next=https://res.mywebsite.com/"   # 200 = the app is fine
+```
+
+If the first is 200 and the second 403, the rule is keyed on the URL shape and the fix
+is on the proxy (Block Common Exploits off, or a narrower custom rule).
+
 ### Local
 
 ```bash
@@ -97,6 +170,8 @@ Required env (defaults in parentheses):
 | `SUMMARIZER_MODEL` | `/models/diffusiongemma` |
 | `PLANNER_MODEL` | `Qwen3.5-9B-Q4_0.gguf` |
 | `QDRANT_URL` | `http://192.168.0.100:6333` |
+| `TRUST_PROXY` | `true` — believe `X-Forwarded-*` from the proxy |
+| `SESSION_COOKIE_SECURE` | `false` — set `true` for a TLS-only deployment |
 | `EMBED_URL` | `http://192.168.0.100:8090` |
 | `REPOS_PATH` | `/repos` |
 | `RESIDUALITY_PORT` | `5010` |
@@ -132,14 +207,18 @@ see [Model settings](#model-settings).
    or press **AI** and describe the change, letting a model draft the replacement.
    Either way the result is a draft in the box, shown as a diff against the original;
    Save splices the range and leaves it dirty for Regenerate & Commit.
-5. **Chat** — the tab is a planning conversation on the planner model. Every message
-   carries the recent git log (last 10 commits), the project's `README.md` and an
-   outline of its `graph.dot` — files, imports and symbol names, not the raw DOT —
-   plus the history of the conversation you are in. Conversations are
-   stored under `.residuality/chats/` (one JSON file each, surviving restarts) and
-   listed in the sidebar; **+ New conversation** starts fresh with the injected
-   context and none of the history from any other conversation.
-6. **Merge** — select two commits and let the model reconcile divergent files into a
+5. **Plan** — the tab is this project's thinking space. The conversation runs on the
+   planner model; every message carries the recent git log (last 10 commits), the
+   project's `README.md` and an outline of its `graph.dot` — files, imports and symbol
+   names, not the raw DOT — plus the history of the conversation you are in. Conversations
+   are stored under `.residuality/chats/` (one JSON file each, surviving restarts) and
+   listed in the sidebar; **+ New conversation** starts fresh with the injected context
+   and none of the history from any other conversation. **Assess project state** puts that
+   same context to the model as a question — latest snapshot, graph outline, recent log —
+   and answers with an assessment, a next task, the files it expects to touch, risks and
+   open questions. It also reports which of those three inputs it actually had, so a
+   project with nothing indexed yet reads as *not yet* rather than as an empty project.
+7. **Merge** — select two commits and let the model reconcile divergent files into a
    two-parent merge commit.
 
 ### Hand-editing a node, or a whole file
@@ -241,18 +320,18 @@ fenced reply there would reach history, past the point a diff can undo.
 
 ### Model settings
 
-The homepage settings panel covers: the shared **default** model, separate **chat** and
+The settings page (`/settings`) covers: the shared **default** model, separate **chat** and
 **edit** overrides, the endpoint URL, the API key, the prompt and system prompt used for
 edits, the model's **context window**, and how much of a range one edit may send. Precedence is per-call model → slot override → default → environment, and an
 empty override means *follow the default* rather than *unset*.
 
 Settings are saved to `residuality_models.cfg`, beside the projects and inside the
 `/repos` mount so they survive a container recreate, and they layer *over* the
-environment: an install that never opens the panel runs entirely off `.env`, and
+environment: an install that never opens the page runs entirely off `.env`, and
 clearing a field hands it back. The file is `0600` because it can hold an API key, and a
 blank key field means *keep the stored one* — the value is never sent back to the
 browser. The model list is filled in by JavaScript after the page renders, so a slow or
-dead endpoint delays a dropdown rather than the homepage, and an unreachable one leaves
+dead endpoint delays a dropdown rather than the page itself, and an unreachable one leaves
 the saved value selected in the dropdown. The slots are `<select>`s, and each one is
 rendered with its saved value already in it, so a failed fetch leaves a control that
 still posts what was stored rather than an empty one that would post nothing.
@@ -291,7 +370,7 @@ node per element would be thousands of nodes for one page. What becomes a node i
 
 | In the template | In the graph |
 |---|---|
-| `<div id="chat-messages">` | `type="section"`, id `<file>::<tag>#<id>`, spanning start tag to end tag |
+| `<div id="plan-messages">` | `type="section"`, id `<file>::<tag>#<id>`, spanning start tag to end tag |
 | an `id` element nested in another | `contains` edge from the enclosing section, not from the file |
 | inline `<script>` / `<style>` | `type="section"`, `<file>::script#1` / `<file>::style#1`, numbered per tag |
 | `<script src>`, `<link href>` | `imports` edge |
@@ -329,11 +408,11 @@ Two sharp edges worth keeping in mind when adding anything here:
   `fiction` (reader knows / open threads / tone / last hook) versus `code`
   (current task / key decisions / what's working / what's broken). The same search
   endpoint returns both; `format_snapshot_for_context` renders the right fields.
-- **Chat conversations are files, not memory.** Each conversation is a JSON file
+- **Plan conversations are files, not memory.** Each conversation is a JSON file
   under `.residuality/chats/`, so history survives a restart. The injected context
   (git log, `README.md`, the graph outline) is re-read on every message, so it is
   always current; a conversation carries only its own history, never another's.
-- **Chat carries a graph *summary*, not graph.dot.** `render_graph_summary`
+- **Plan carries a graph *summary*, not graph.dot.** `render_graph_summary`
   re-renders the parsed graph as files, imports and symbol names. The raw DOT is
   192 KB here — ~48K tokens on *every* message, most of a conversation's budget
   gone before the first question — and 52% of it was two vendored React bundles.
@@ -343,6 +422,28 @@ Two sharp edges worth keeping in mind when adding anything here:
   and the only containment worth keeping is that a method belongs to a class.
   Line numbers are deliberately left out: the outline answers "what exists", and
   the exact span is looked up from the graph when an edit is actually made.
+- **The commit list is a table, and the drawn DAG is gone.** `/projects/<id>` used to render
+  a `vis-network` graph of commit parentage. The list carries the same information — parents,
+  branches, merge markers — in a form that can be filtered, searched and acted on, without a
+  CDN dependency, and `/projects/<id>` now redirects to Project Control so every old link and
+  every post-action redirect lands somewhere real.
+- **The Plan assessment exists because the button did not.** Project Control had a Plan button
+  posting to `/projects/<id>/plan`, and no such route was ever written: it POSTed into a 404,
+  got an HTML error page back, and died on `JSON.parse` of the first character. The client
+  method (`OWUIClient.generate_plan`) and the frontend stub both existed; the route between
+  them is what was missing. The assessment lives on the Plan page now.
+- **Latest-snapshot lookup is a scroll, not a search.** `snapshot.latest_snapshot` sorts the
+  stored payloads on their timestamp. Asking the vector index for "what happened last" would
+  be asking a relevance question a recency question, and could answer with a very *relevant*
+  old snapshot. Both it and the semantic search map payloads through one function
+  (`_snapshot_from_payload`), so a field cannot exist on one path and be missing on the other.
+
+- **The app is proxy-aware, and its login redirect is a path.** Two separate bugs
+  met on the same page. WSGI has no idea it is behind TLS, so the app generated
+  absolute `http://` URLs (`ProxyFix` fixes that); and `next=request.url` put a full
+  `https://` URL inside a query parameter, which is the open-redirect shape a WAF
+  blocks with a 403 before the app runs. A relative path fixes both the security
+  hole and the 403, and it survives the public name changing.
 - **Settings layer over the environment, never replace it.** `load_config` starts from
   `.env` and applies the config file on top, so a key deleted from the file falls back
   to its environment value instead of becoming empty. The alternative — writing the

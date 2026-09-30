@@ -208,6 +208,36 @@ def store_snapshot(
     }])
 
 
+def _snapshot_from_payload(payload: dict, score: Optional[float] = None) -> dict:
+    """One stored snapshot in the shape the rest of the app expects.
+
+    Both readers — semantic search, and the latest-snapshot lookup the Plan
+    page assesses with — come through here, so a field cannot exist on one
+    path and be missing on the other.
+    """
+    return {
+        "commit_hash":    payload.get("commit_hash", ""),
+        "commit_message": payload.get("commit_message", ""),
+        "state":          payload.get("state", ""),
+        "project_type":   payload.get("project_type", "code"),
+        "timestamp":      payload.get("timestamp", 0),
+        "score":          round(score, 3) if score is not None else None,
+        # Code fields
+        "current_task":   payload.get("current_task"),
+        "key_decisions":  payload.get("key_decisions", []),
+        "open_questions": payload.get("open_questions", []),
+        "working":        payload.get("working", []),
+        "broken":         payload.get("broken", []),
+        # Fiction fields
+        "reader_knows":        payload.get("reader_knows", []),
+        "reader_doesnt_know":  payload.get("reader_doesnt_know", []),
+        "open_threads":        payload.get("open_threads", []),
+        "foreshadowed":        payload.get("foreshadowed", []),
+        "tone":                payload.get("tone"),
+        "last_hook":           payload.get("last_hook"),
+    }
+
+
 def search_snapshots(
     query: str,
     project_id: Optional[str] = None,
@@ -232,33 +262,42 @@ def search_snapshots(
             timeout=15,
         )
         results = r.json().get("result", [])
-        return [
-            {
-                "commit_hash":    p["payload"].get("commit_hash", ""),
-                "commit_message": p["payload"].get("commit_message", ""),
-                "state":          p["payload"].get("state", ""),
-                "project_type":   p["payload"].get("project_type", "code"),
-                "timestamp":      p["payload"].get("timestamp", 0),
-                "score":          round(p.get("score", 0.0), 3),
-                # Code fields
-                "current_task":   p["payload"].get("current_task"),
-                "key_decisions":  p["payload"].get("key_decisions", []),
-                "open_questions": p["payload"].get("open_questions", []),
-                "working":        p["payload"].get("working", []),
-                "broken":         p["payload"].get("broken", []),
-                # Fiction fields
-                "reader_knows":        p["payload"].get("reader_knows", []),
-                "reader_doesnt_know":  p["payload"].get("reader_doesnt_know", []),
-                "open_threads":        p["payload"].get("open_threads", []),
-                "foreshadowed":        p["payload"].get("foreshadowed", []),
-                "tone":                p["payload"].get("tone"),
-                "last_hook":           p["payload"].get("last_hook"),
-            }
-            for p in results
-        ]
+        return [_snapshot_from_payload(p.get("payload", {}), p.get("score"))
+                for p in results]
     except Exception as e:
         logger.warning(f"Snapshot search failed: {e}")
         return []
+
+
+def latest_snapshot(project_id: str) -> Optional[dict]:
+    """The most recent snapshot stored for a project, or None.
+
+    Scrolled and sorted on the stored timestamp rather than searched: "what
+    happened last" is an ordering question, and a semantic query could return a
+    very *relevant* old snapshot as its nearest neighbour. A project stores one
+    snapshot per commit, so reading the payloads and sorting them is both
+    simpler and correct.
+
+    None is a normal answer — a project with nothing indexed yet — so callers
+    treat it as "no snapshot", not as a failure.
+    """
+    try:
+        r = requests.post(
+            f"{QDRANT_URL}/collections/{snapshots_collection(project_id)}/points/scroll",
+            json={"limit": 200, "with_payload": True, "with_vector": False},
+            headers={"Content-Type": "application/json"},
+            timeout=15,
+        )
+        points = r.json().get("result", {}).get("points", [])
+    except Exception as e:
+        logger.warning(f"Snapshot scroll failed: {e}")
+        return None
+
+    if not points:
+        return None
+    payloads = [p.get("payload", {}) for p in points]
+    payloads.sort(key=lambda p: p.get("timestamp", 0), reverse=True)
+    return _snapshot_from_payload(payloads[0])
 
 
 def format_snapshot_for_context(snapshot: dict) -> str:

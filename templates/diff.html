@@ -2,7 +2,7 @@
 {% block title %}Diff {{ commit_a }}..{{ commit_b }} — Residuality{% endblock %}
 {% block content %}
 <h1>Diff {{ commit_a }} → {{ commit_b }}</h1>
-<a href="{{ url_for('dag', project_id=project_id) }}" class="btn" style="margin-bottom:1rem;">← DAG</a>
+<a href="{{ url_for('history', project_id=project_id) }}" class="btn" style="margin-bottom:1rem;">← History</a>
 <div class="card">
 {% if diff %}
 <pre>{% for line in diff.splitlines() %}<span class="{% if line.startswith('+') and not line.startswith('+++') %}diff-add{% elif line.startswith('-') and not line.startswith('---') %}diff-del{% endif %}">{{ line }}

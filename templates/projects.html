@@ -3,126 +3,11 @@
 {% block content %}
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
     <h1>Projects</h1>
-    <a href="{{ url_for('new_project') }}" class="btn btn-primary">+ New Project</a>
+    <div style="display:flex; gap:0.5rem;">
+        <a href="{{ url_for('settings_page') }}" class="btn">&#9881; AI settings</a>
+        <a href="{{ url_for('new_project') }}" class="btn btn-primary">+ New Project</a>
+    </div>
 </div>
-
-{# The summary line carries the current selection, so the settings can be read
-   without expanding the panel. #}
-<details class="card" style="padding:0;">
-    <summary style="cursor:pointer;padding:0.75rem 1rem;font-size:0.9rem;color:#8b949e;">
-        ⚙ AI settings —
-        <span style="color:#58a6ff;font-family:monospace;">default: {{ model_cfg.get('default','') }}</span>
-        {% if resolved_edit != model_cfg.get('default','') %}
-            <span style="color:#8b949e;">· edit: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_edit }}</span>
-        {% endif %}
-        {% if resolved_chat != model_cfg.get('default','') %}
-            <span style="color:#8b949e;">· chat: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_chat }}</span>
-        {% endif %}
-    </summary>
-
-    <form method="POST" action="{{ url_for('settings_models') }}" style="padding:0 1rem 1rem;">
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;">
-            <div>
-                <label for="s-default">Default model <span style="color:#484f58;">(chat + edits)</span></label>
-                <select id="s-default" name="default">
-                    <option value="{{ model_cfg.get('default','') }}" selected>{{ model_cfg.get('default','') or 'from .env' }}</option>
-                </select>
-            </div>
-            <div>
-                <label for="s-chat">Chat override</label>
-                <select id="s-chat" name="chat">
-                    <option value="{{ model_cfg.get('chat','') }}" selected>{{ model_cfg.get('chat','') or 'follow the default' }}</option>
-                </select>
-            </div>
-            <div>
-                <label for="s-edit">Edit override</label>
-                <select id="s-edit" name="edit">
-                    <option value="{{ model_cfg.get('edit','') }}" selected>{{ model_cfg.get('edit','') or 'follow the default' }}</option>
-                </select>
-            </div>
-            <div>
-                <label for="s-url">Endpoint <span style="color:#484f58;">(OpenAI-compatible)</span></label>
-                <input id="s-url" name="owui_url"
-                       value="{{ model_cfg.get('owui_url','') }}" placeholder="http://host:8282">
-            </div>
-            <div>
-                <label for="s-key">API key</label>
-                <input id="s-key" name="owui_api_key" type="password" value=""
-                       autocomplete="new-password"
-                       placeholder="{{ '•••••• stored — blank keeps it' if api_key_set else 'not set' }}">
-            </div>
-            <div>
-                <label for="s-ctx">Context window <span style="color:#484f58;">(tokens)</span></label>
-                <input id="s-ctx" name="context_tokens" type="number"
-                       min="1" step="1024"
-                       value="{{ model_cfg.get('context_tokens','') }}"
-                       placeholder="{{ context_tokens_default }}">
-                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
-                    How much the model holds at once. One edit may send about half the
-                    window, in characters — the replacement comes back about as long as the
-                    range it replaces, and both have to fit.
-                </p>
-            </div>
-            <div>
-                <label for="s-maxchars">Max characters per edit <span style="color:#484f58;">(blank
-                    = from the window, 0 = no limit)</span></label>
-                <input id="s-maxchars" name="max_edit_chars" type="number"
-                       min="0" step="1000"
-                       value="{{ model_cfg.get('max_edit_chars','') }}"
-                       placeholder="{{ resolved_max_edit_chars }}">
-                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
-                    In force now: <strong>{{ "{:,}".format(resolved_max_edit_chars) }}</strong>
-                    characters per call. A longer range is split on the graph's node
-                    boundaries and sent as several calls, so this is a per-call ceiling,
-                    not a cap on how much can be edited.
-                </p>
-            </div>
-        </div>
-
-        <div style="margin-top:0.75rem;">
-            <label for="s-prompt">Prompt for AI edits</label>
-            <textarea id="s-prompt" name="edit_prompt" rows="3" spellcheck="false">{{ model_cfg.get('edit_prompt','') }}</textarea>
-            <p style="font-size:0.75rem;color:#8b949e;">
-                Sent as the system prompt. The lines on screen and your description go in the user
-                message, so this only has to say what shape the answer should come back in.
-                <a href="#" id="s-prompt-reset" data-default="{{ edit_prompt_default }}"
-                   style="color:#58a6ff;">reset to default</a>
-            </p>
-        </div>
-
-        <details style="margin-top:0.5rem;">
-            <summary style="cursor:pointer;font-size:0.8rem;color:#8b949e;">Advanced roles</summary>
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:0.75rem;margin-top:0.5rem;">
-                <div>
-                    <label for="s-planner">Planner model</label>
-                    <select id="s-planner" name="planner">
-                        <option value="{{ model_cfg.get('planner','') }}" selected>{{ model_cfg.get('planner','') or 'follow the default' }}</option>
-                    </select>
-                </div>
-                <div>
-                    <label for="s-summarizer">Summarizer model <span style="color:#484f58;">(commits, summaries)</span></label>
-                    <select id="s-summarizer" name="summarizer">
-                        <option value="{{ model_cfg.get('summarizer','') }}" selected>{{ model_cfg.get('summarizer','') or 'follow the default' }}</option>
-                    </select>
-                </div>
-            </div>
-        </details>
-
-        <div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;">
-            <button class="btn btn-primary" type="submit">Save settings</button>
-            <button class="btn" type="button" id="s-reload">Reload models</button>
-            <span id="s-model-status" style="font-size:0.75rem;color:#8b949e;"></span>
-        </div>
-
-
-        <p style="font-size:0.75rem;color:#8b949e;margin-top:0.5rem;">
-            Saved to <code>{{ config_file }}</code>. These values override <code>.env</code>,
-            so blanking a field hands it back to the environment. The model list is whatever
-            the configured API key can see — that is also what an edit is checked against
-            before it is sent.
-        </p>
-    </form>
-</details>
 
 {% if projects %}
 <div class="card">
@@ -138,7 +23,7 @@
         {% for p in projects %}
             <tr>
                 <td>
-                    <a href="{{ url_for('dag', project_id=p.id) }}"
+                    <a href="{{ url_for('graph_view', project_id=p.id) }}"
                        style="color:#58a6ff; text-decoration:none; font-family:monospace;">
                         {{ p.id }}
                     </a>
@@ -151,9 +36,9 @@
                     {% endif %}
                 </td>
                 <td>
-                    <a href="{{ url_for('dag',         project_id=p.id) }}" class="btn">DAG</a>
-                    <a href="{{ url_for('chat',        project_id=p.id) }}" class="btn">Chat</a>
+                    <a href="{{ url_for('plan',        project_id=p.id) }}" class="btn">Plan</a>
                     <a href="{{ url_for('graph_view',  project_id=p.id) }}" class="btn">Project Control</a>
+                    <a href="{{ url_for('history',     project_id=p.id) }}" class="btn">History</a>
                     <a href="{{ url_for('search',      project_id=p.id) }}" class="btn">Search</a>
                 </td>
             </tr>
@@ -171,73 +56,4 @@
     or place an existing git repo in <code>/repos/</code>.
 </div>
 {% endif %}
-{% endblock %}
-
-{% block scripts %}
-<script>
-// The model list comes from the endpoint after the page renders, so rendering
-// the homepage never blocks on OWUI, and a dead endpoint leaves the saved value
-// in each dropdown with an explanation rather than an empty control.
-(function() {
-    var status = document.getElementById('s-model-status');
-    var SLOTS  = ['s-default', 's-chat', 's-edit', 's-planner', 's-summarizer'];
-
-    function esc(s) {
-        return String(s == null ? '' : s)
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-    }
-
-    // A dropdown per slot, blank first because blank is a real value here: it
-    // hands the slot back to the default or to .env. Each slot is rendered with
-    // its saved value already in it, so if this fetch never lands the form still
-    // posts what was stored rather than posting nothing at all.
-    function fill(id, models) {
-        var sel     = document.getElementById(id);
-        var current = sel.value;
-        var html    = '<option value="">(blank - follow the default / .env)</option>';
-        var seen    = false;
-        models.forEach(function(m) {
-            if (m.id === current) seen = true;
-            html += '<option value="' + esc(m.id) + '">' + esc(m.name || m.id) + '</option>';
-        });
-        if (current && !seen) {
-            html += '<option value="' + esc(current) + '">' + esc(current) +
-                    ' - not offered by this key</option>';
-        }
-        sel.innerHTML = html;
-        sel.value = current;
-    }
-
-    function load(force) {
-        status.textContent = 'loading models…';
-        status.style.color = '#8b949e';
-        fetch('/api/models' + (force ? '?refresh=1' : ''))
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
-                var models = d.models || [];
-                SLOTS.forEach(function(id) { fill(id, models); });
-                if (d.error) {
-                    status.textContent = 'models unavailable — ' + d.error;
-                    status.style.color = '#d29922';
-                } else {
-                    status.textContent = models.length + ' models at ' + d.endpoint;
-                    status.style.color = '#8b949e';
-                }
-            })
-            .catch(function(e) {
-                status.textContent = 'could not reach the app: ' + e;
-                status.style.color = '#f85149';
-            });
-    }
-
-    document.getElementById('s-reload').addEventListener('click', function() { load(true); });
-    document.getElementById('s-prompt-reset').addEventListener('click', function(e) {
-        e.preventDefault();
-        document.getElementById('s-prompt').value = this.dataset.default;
-    });
-
-    load(false);
-})();
-</script>
 {% endblock %}

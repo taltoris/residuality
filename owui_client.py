@@ -8,10 +8,16 @@ That same endpoint is where the model list comes from, so this module also owns
 The roles, in the order they matter here:
 
   default     the one shared model, used by anything with no override
-  chat        override for the Chat tab          ("" = follow default)
+  chat        override for the "chat" slot        ("" = follow default)
   edit        override for AI-assisted edits     ("" = follow default)
-  planner     the Project Control planner
+  planner     the Plan tab: conversations and assessments
   summarizer  commit messages + rolling summaries
+
+Note on `chat`: it is retained and still saved, but nothing reads it. The Plan
+tab runs on `planner`, and `chat()` takes its model per call (falling back to
+`default`), so `CHAT_MODEL` is assigned and never used. It is kept so an
+existing config file does not silently lose a value on upgrade; retiring it is
+a config migration, not an edit.
 """
 
 import os
@@ -87,7 +93,7 @@ def load_config() -> dict:
     """Current settings: env first, then anything the config file overrides.
 
     The file is layered *over* the environment rather than replacing it, so an
-    install that never opens the settings panel runs entirely off .env, and a
+    install that never opens the settings page runs entirely off .env, and a
     key removed from the file falls back to its .env value instead of becoming
     empty.
     """
@@ -635,8 +641,15 @@ class OWUIClient:
         snapshot: Optional[str],
         graph_summary: Optional[str],
         recent_commits: Optional[list] = None,
+        model: Optional[str] = None,
     ) -> dict:
-        """Ask the planner model to assess project state and suggest next steps."""
+        """Ask the planner model to assess project state and suggest next steps.
+
+        Every context part is optional and None is the normal case rather than
+        an error: no snapshot until the first indexed commit, no graph until the
+        first build, no log on a fresh repo. What is missing is named in the
+        prompt, so the model reads it as "not yet" rather than "nothing here".
+        """
         import json, re
     
         context_parts = []
@@ -645,14 +658,28 @@ class OWUIClient:
         if graph_summary:
             context_parts.append(f"## Codebase Structure\n{graph_summary}")
         if recent_commits:
+            # `commit_hash` or `hash` depending on whether the caller passed a
+            # commit record or a git log line; both mean the same thing here.
             commit_lines = "\n".join([
-                f"- [{c['commit_hash'][:8]}] {c['message']}"
+                f"- [{str(c.get('commit_hash') or c.get('hash') or '')[:8]}] "
+                f"{c.get('message', '')}"
                 for c in recent_commits[:5]
             ])
             context_parts.append(f"## Recent Commits\n{commit_lines}")
     
+        missing = []
+        if not snapshot:
+            missing.append("no snapshot has been indexed for this project yet")
+        if not graph_summary:
+            missing.append("the code graph has not been built yet")
+        if not recent_commits:
+            missing.append("there is no commit history yet")
+
         prompt = (
             "\n\n".join(context_parts) +
+            (("\n\n## Not Available\n" +
+              "\n".join(f"- {m}" for m in missing))
+             if missing else "") +
             "\n\n## Task\n"
             "Based on the project state above, suggest what to work on next.\n"
             "Return ONLY raw JSON:\n"
@@ -669,7 +696,7 @@ class OWUIClient:
         try:
             response = self.chat(
                 messages=[{"role": "user", "content": prompt}],
-                model=self.PLANNER_MODEL,
+                model=model or self.PLANNER_MODEL,
             )
             clean = re.sub(r'```json|```', '', response).strip()
             # Strip thinking block if present

@@ -12,7 +12,7 @@
         <textarea name="instruction" rows="3"
             placeholder="Combine the best elements of both versions, resolving any contradictions..."></textarea>
         <button type="submit" class="btn btn-primary">Merge via AI</button>
-        <a href="{{ url_for('dag', project_id=project_id) }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
+        <a href="{{ url_for('history', project_id=project_id) }}" class="btn" style="margin-left:0.5rem;">Cancel</a>
     </form>
 </div>
 
@@ -21,7 +21,7 @@
     <table>
         <thead><tr><th>Hash</th><th>Message</th><th>Branches</th></tr></thead>
         <tbody>
-        {% for c in dag_nodes[:20] %}
+        {% for c in commits[:20] %}
         <tr>
             <td style="font-family:monospace; color:#58a6ff;">
                 <span style="cursor:pointer;" onclick="copyHash('{{ c.short }}')">{{ c.short }}</span>

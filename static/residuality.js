@@ -265,17 +265,23 @@ function searchGraph(projectId) {
         .catch(err => console.error('searchGraph:', err));
 }
 
-// ── Chat ──────────────────────────────────────────────────────────────────
+// ── Plan ──────────────────────────────────────────────────────────────────
+//
+// The Plan tab is two things and both are here: the conversation, and the
+// assessment. The conversation posts one turn at a time and paints the reply
+// into the page. The assessment asks the planner model to read what the last
+// commits settled, what the graph looks like and where the log stopped, and
+// answer with the next task.
 
-function sendChatMessage(projectId, chatId) {
-    const input    = document.getElementById('user-input');
-    const messages = document.getElementById('chat-messages');
-    const sendBtn  = document.getElementById('send-btn');
+function sendPlanMessage(projectId, convId) {
+    const input    = document.getElementById('plan-input');
+    const messages = document.getElementById('plan-messages');
+    const sendBtn  = document.getElementById('plan-send');
     const msg      = input?.value.trim();
     if (!msg) return;
 
-    messages.innerHTML += `
-        <div class="msg user"><div class="role">You</div>
+    messages.innerHTML +=
+        `<div class="msg user"><div class="role">You</div>
         <div class="content">${escapeHtml(msg)}</div></div>
         <div class="msg assistant" id="pending">
         <div class="role">Residuality</div>
@@ -286,9 +292,9 @@ function sendChatMessage(projectId, chatId) {
 
     const form = new FormData();
     form.append('message', msg);
-    form.append('chat', chatId);
+    form.append('chat', convId);
 
-    fetch(`/projects/${projectId}/chat`, { method: 'POST', body: form })
+    fetch(`/projects/${projectId}/plan/chat`, { method: 'POST', body: form })
         .then(r => {
             if (!r.ok) return r.text().then(t => { throw new Error('Server error ' + r.status + ': ' + t.slice(0, 200)); });
             return r.json();
@@ -307,23 +313,92 @@ function sendChatMessage(projectId, chatId) {
         });
 }
 
-function newChat(projectId) {
+// Both of these are form posts that the server answers with a redirect, so
+// there is nothing to parse back: the response's own URL is where the browser
+// should end up. The fallback is the Plan page itself, for the case the
+// redirect is stripped by something in front of the app.
+function newConversation(projectId) {
     const form = new FormData();
     form.append('chat', '');
-    fetch(`/projects/${projectId}/chat/new`, { method: 'POST', body: form })
-        .then(r => r.url)
-        .then(url => { window.location.href = url; })
+    fetch(`/projects/${projectId}/plan/new`, { method: 'POST', body: form })
+        .then(r => { window.location.href = r.url || `/projects/${projectId}/plan`; })
         .catch(e => alert('Could not start a new conversation: ' + e.message));
 }
 
-function deleteChat(projectId, chatId) {
+function deleteConversation(projectId, convId) {
     if (!confirm('Delete this conversation?')) return;
     const form = new FormData();
-    form.append('chat', chatId);
-    fetch(`/projects/${projectId}/chat/delete`, { method: 'POST', body: form })
-        .then(r => r.url)
-        .then(url => { window.location.href = url; })
+    form.append('chat', convId);
+    fetch(`/projects/${projectId}/plan/delete`, { method: 'POST', body: form })
+        .then(r => { window.location.href = r.url || `/projects/${projectId}/plan`; })
         .catch(e => alert('Could not delete the conversation: ' + e.message));
+}
+
+// ── Plan: assessment ──────────────────────────────────────────────────────
+
+function assessListHtml(title, items) {
+    if (!items || !items.length) return '';
+    return '<p class="lab">' + title + '</p><ul>' +
+        items.map(i => '<li>' + escapeHtml(i) + '</li>').join('') +
+        '</ul>';
+}
+
+function renderAssessment(p) {
+    let html = '';
+    if (p.assessment) html += '<p><span class="lab">Assessment:</span> ' + escapeHtml(p.assessment) + '</p>';
+    if (p.next_task)  html += '<p><span class="lab">Next task:</span> '  + escapeHtml(p.next_task)  + '</p>';
+    if (p.approach)   html += '<p><span class="lab">Approach:</span> '   + escapeHtml(p.approach)   + '</p>';
+    html += assessListHtml('Files to touch', p.files_to_touch);
+    if (p.risks)      html += '<p><span class="lab">Risks:</span> '      + escapeHtml(p.risks)      + '</p>';
+    html += assessListHtml('Open questions', p.open_questions);
+
+    // What the answer was actually based on. A fresh project has no snapshot
+    // and no graph yet, and an assessment that does not say so reads as though
+    // the model had looked at everything.
+    const c    = p.context || {};
+    const commits = c.commits || 0;
+    const bits = [
+        c.snapshot      ? 'latest snapshot' : 'no snapshot indexed yet',
+        c.graph_summary ? 'graph outline'   : 'no graph built yet',
+        commits + ' recent commit' + (commits === 1 ? '' : 's'),
+    ];
+    html += '<p style="font-size:0.75rem;color:#8b949e;margin-top:0.5rem;">' +
+            'Read from: ' + bits.join(' · ') + '</p>';
+    return html;
+}
+
+function assessProject(projectId) {
+    const btn    = document.getElementById('assess-btn');
+    const status = document.getElementById('assess-status');
+    const out    = document.getElementById('assess-output');
+    if (!btn || !out) return;
+
+    const label = btn.textContent;
+    btn.disabled       = true;
+    btn.textContent    = 'Thinking…';
+    status.textContent = 'Reading the snapshot, the graph and the log…';
+    out.innerHTML      = '';
+
+    fetch(`/projects/${projectId}/plan/assess`, { method: 'POST' })
+        .then(r => r.json().then(d => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+            btn.disabled    = false;
+            btn.textContent = label;
+            status.textContent = '';
+            if (!ok || d.error) {
+                out.innerHTML = '<p style="color:#f85149;font-size:0.88rem;">Assess failed: ' +
+                    escapeHtml(d.error || 'unknown error') + '</p>';
+                return;
+            }
+            out.innerHTML = renderAssessment(d);
+        })
+        .catch(e => {
+            btn.disabled    = false;
+            btn.textContent = label;
+            status.textContent = '';
+            out.innerHTML = '<p style="color:#f85149;font-size:0.88rem;">Assess failed: ' +
+                escapeHtml(String(e)) + '</p>';
+        });
 }
 
 // ── Graph drill-down and external imports toggle ──────────────────────────
