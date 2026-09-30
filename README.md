@@ -16,7 +16,7 @@ store). Nothing leaves your machine.
 | **Artifact store** | Every project is a real git repo under `/repos/<project_id>`. `read`, `write`, `branch`, `merge`, `checkout`, `diff` — all backed by GitPython. |
 | **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts`, `.rs` and `.html`/`.htm` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions, template sections and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
 | **Memory** | Each commit indexes its message and its graph nodes into Qdrant, and generates an *episodic snapshot* (state, decisions, open questions) that is also vectorised. |
-| **Chat** | Chat is scoped to a project. It pulls in the rolling summary, the last few exchanges, and — keyword-triggered — relevant commits or relevant graph nodes. It edits one node at a time, not whole files. |
+| **Chat** | Chat is scoped to a project and runs on the *planner* model. Every message is sent with fresh context — the recent git log, `README.md` and `graph.dot` — plus the history of the conversation you are in. Conversations are stored per project and listed in a sidebar; a new one starts with the injected context and nothing from any other conversation. |
 | **Merge** | Pick two divergent commits; the model reconciles conflicting files into a merge commit with two parents. |
 
 ---
@@ -132,9 +132,12 @@ see [Model settings](#model-settings).
    or press **AI** and describe the change, letting a model draft the replacement.
    Either way the result is a draft in the box, shown as a diff against the original;
    Save splices the range and leaves it dirty for Regenerate & Commit.
-5. **Chat** — mention something historical (`when did`, `broke`, `changed`) to pull in
-   relevant commits and snapshots; mention structure (`function`, `class`, `where is`)
-   to pull in graph nodes. The current node's content is injected as ground truth.
+5. **Chat** — the tab is a planning conversation on the planner model. Every message
+   carries the recent git log (last 10 commits), the project's `README.md` and its
+   `graph.dot`, plus the history of the conversation you are in. Conversations are
+   stored under `.residuality/chats/` (one JSON file each, surviving restarts) and
+   listed in the sidebar; **+ New conversation** starts fresh with the injected
+   context and none of the history from any other conversation.
 6. **Merge** — select two commits and let the model reconcile divergent files into a
    two-parent merge commit.
 
@@ -325,10 +328,10 @@ Two sharp edges worth keeping in mind when adding anything here:
   `fiction` (reader knows / open threads / tone / last hook) versus `code`
   (current task / key decisions / what's working / what's broken). The same search
   endpoint returns both; `format_snapshot_for_context` renders the right fields.
-- **Memory is stateless between requests.** `_conversation_state` holds the rolling
-  summary and the last 20 exchanges in-memory; everything else (commits, nodes,
-  snapshots) comes back from Qdrant on every message. Restart the server and you lose
-  the working summary, not the history.
+- **Chat conversations are files, not memory.** Each conversation is a JSON file
+  under `.residuality/chats/`, so history survives a restart. The injected context
+  (git log, `README.md`, `graph.dot`) is re-read on every message, so it is always
+  current; a conversation carries only its own history, never another's.
 - **Settings layer over the environment, never replace it.** `load_config` starts from
   `.env` and applies the config file on top, so a key deleted from the file falls back
   to its environment value instead of becoming empty. The alternative — writing the
@@ -348,8 +351,6 @@ Two sharp edges worth keeping in mind when adding anything here:
 
 ### Known limitations
 
-- `chat_send` reads the **working tree** (`repo.read(path)`) rather than the commit a
-  node belongs to, so content can be stale when browsing history.
 - `merge` recomputes `repo.diff(a, b)` once **per file** instead of once per merge.
 - `indexer.py` and `snapshot.py` each carry their own `_embed`, `_ensure_collection`
   and upsert/search helpers. Identical code, different names.

@@ -267,9 +267,8 @@ function searchGraph(projectId) {
 
 // ── Chat ──────────────────────────────────────────────────────────────────
 
-function sendChatMessage(projectId) {
+function sendChatMessage(projectId, chatId) {
     const input    = document.getElementById('user-input');
-    const artifact = document.getElementById('artifact-select');
     const messages = document.getElementById('chat-messages');
     const sendBtn  = document.getElementById('send-btn');
     const msg      = input?.value.trim();
@@ -287,7 +286,7 @@ function sendChatMessage(projectId) {
 
     const form = new FormData();
     form.append('message', msg);
-    if (artifact) form.append('artifact_path', artifact.value);
+    form.append('chat', chatId);
 
     fetch(`/projects/${projectId}/chat`, { method: 'POST', body: form })
         .then(r => {
@@ -306,6 +305,25 @@ function sendChatMessage(projectId) {
             if (pending) pending.querySelector('.content').textContent = 'Error: ' + e.message;
             if (sendBtn) sendBtn.disabled = false;
         });
+}
+
+function newChat(projectId) {
+    const form = new FormData();
+    form.append('chat', '');
+    fetch(`/projects/${projectId}/chat/new`, { method: 'POST', body: form })
+        .then(r => r.url)
+        .then(url => { window.location.href = url; })
+        .catch(e => alert('Could not start a new conversation: ' + e.message));
+}
+
+function deleteChat(projectId, chatId) {
+    if (!confirm('Delete this conversation?')) return;
+    const form = new FormData();
+    form.append('chat', chatId);
+    fetch(`/projects/${projectId}/chat/delete`, { method: 'POST', body: form })
+        .then(r => r.url)
+        .then(url => { window.location.href = url; })
+        .catch(e => alert('Could not delete the conversation: ' + e.message));
 }
 
 // ── Graph drill-down and external imports toggle ──────────────────────────

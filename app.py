@@ -4,6 +4,7 @@ AI-assisted artifact versioning with git + Qdrant + Open WebUI.
 """
 
 import os
+import re
 import json
 import logging
 import zipfile
@@ -392,21 +393,153 @@ def search(project_id: str):
                            results=results)
 
 # ── Chat ──────────────────────────────────────────────────────────────────
+#
+# The chat tab is a planning conversation: it runs on the *planner* model and
+# every message is sent with the same fresh context — recent git log, the
+# project README and the graph — plus the history of the conversation the user
+# is in. Conversations are stored per project under .residuality/chats/ (one
+# JSON file each) so they survive a restart, and a new conversation starts with
+# the injected context and nothing from any other conversation.
 
-_conversation_state: dict = {}
+CHAT_LOG_COMMITS  = 10   # how far back the injected git log reaches
+CHAT_HISTORY_LIMIT = 20  # exchanges of a conversation sent to the model
+
+
+def _chats_dir(repo: ArtifactRepo) -> Path:
+    d = repo.repo_path / ".residuality" / "chats"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _chat_id_ok(chat_id: str) -> bool:
+    """Conversation ids are file names; keep them to safe characters."""
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", chat_id))
+
+
+def _load_chat(repo: ArtifactRepo, chat_id: str) -> dict:
+    path = _chats_dir(repo) / f"{chat_id}.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, dict) and isinstance(data.get("history"), list):
+                return data
+        except Exception as e:
+            logger.warning(f"Could not read chat {chat_id}: {e}")
+    return {"id": chat_id, "title": "New conversation", "history": []}
+
+
+def _save_chat(repo: ArtifactRepo, chat: dict) -> None:
+    path = _chats_dir(repo) / f"{chat['id']}.json"
+    tmp  = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(chat, indent=2))
+    tmp.rename(path)
+
+
+def _new_chat_id(repo: ArtifactRepo) -> str:
+    existing = {p.stem for p in _chats_dir(repo).glob("*.json")}
+    n = 1
+    while f"chat-{n}" in existing:
+        n += 1
+    return f"chat-{n}"
+
+
+def _chat_context_parts(repo: ArtifactRepo) -> list:
+    """The context every chat message is sent with, read fresh each time.
+
+    Recent git log, the README and the graph. Each part degrades to a note
+    rather than failing the message when the file is missing.
+    """
+    parts = []
+
+    try:
+        log_lines = [
+            f"- [{c['hash']}] {c['message']}"
+            for c in repo.log(limit=CHAT_LOG_COMMITS)
+        ]
+        parts.append(f"## Recent Git Log\n" + "\n".join(log_lines or ["(no commits yet)"]))
+    except Exception as e:
+        logger.warning(f"Chat context: git log failed: {e}")
+
+    try:
+        readme = repo.read("README.md")
+        parts.append(f"## README.md\n{readme}")
+    except Exception:
+        parts.append("## README.md\n(not present in this project)")
+
+    try:
+        dot = repo.get_graph_dot()
+        parts.append(f"## Project Graph (graph.dot)\n{dot}")
+    except Exception as e:
+        parts.append(f"## Project Graph (graph.dot)\n(not built yet: {e})")
+
+    return parts
 
 
 @app.route("/projects/<project_id>/chat", methods=["GET"])
 @login_required
 def chat(project_id: str):
-    repo  = get_repo(project_id)
-    files = repo.list_files()
-    state = _conversation_state.get(project_id, {})
+    repo = get_repo(project_id)
+    chat_id = request.args.get("chat", "").strip()
+    if chat_id and not _chat_id_ok(chat_id):
+        chat_id = ""
+
+    def _chat_entry(p: Path) -> dict:
+        try:
+            data = json.loads(p.read_text())
+            history = data.get("history", [])
+            return {
+                "id":    data.get("id", p.stem),
+                "title": data.get("title") or (history[0]["user"][:60]
+                                               if history else "New conversation"),
+                "turns": len(history),
+                "mtime": p.stat().st_mtime,
+            }
+        except Exception:
+            return {"id": p.stem, "title": p.stem, "turns": 0,
+                    "mtime": p.stat().st_mtime}
+
+    chat_paths = sorted(_chats_dir(repo).glob("*.json"),
+                        key=lambda p: p.stat().st_mtime, reverse=True)
+    conversations = [_chat_entry(p) for p in chat_paths]
+
+    if chat_id:
+        active = _load_chat(repo, chat_id)
+    elif chat_paths:
+        # No explicit conversation: reopen the most recent one, so a plain
+        # page refresh does not pile up empty conversations in the sidebar.
+        active = _load_chat(repo, conversations[0]["id"])
+    else:
+        active = {"id": _new_chat_id(repo), "title": "New conversation",
+                  "history": []}
+        _save_chat(repo, active)
+        conversations = [_chat_entry(_chats_dir(repo) / f"{active['id']}.json")]
+
     return render_template("chat.html",
                            project_id=project_id,
-                           files=files,
-                           summary=state.get("summary"),
-                           history=state.get("history", []))
+                           conversations=conversations,
+                           active=active,
+                           planner_model=resolve_model(model_cfg, "planner"))
+
+
+@app.route("/projects/<project_id>/chat/new", methods=["POST"])
+@login_required
+def chat_new(project_id: str):
+    repo = get_repo(project_id)
+    chat = {"id": _new_chat_id(repo), "title": "New conversation", "history": []}
+    _save_chat(repo, chat)
+    return redirect(url_for("chat", project_id=project_id, chat=chat["id"]))
+
+
+@app.route("/projects/<project_id>/chat/delete", methods=["POST"])
+@login_required
+def chat_delete(project_id: str):
+    repo = get_repo(project_id)
+    chat_id = request.form.get("chat", "").strip()
+    if chat_id and _chat_id_ok(chat_id):
+        path = _chats_dir(repo) / f"{chat_id}.json"
+        if path.exists():
+            path.unlink()
+    return redirect(url_for("chat", project_id=project_id))
 
 
 @app.route("/projects/<project_id>/chat", methods=["POST"])
@@ -414,128 +547,38 @@ def chat(project_id: str):
 def chat_send(project_id: str):
     repo         = get_repo(project_id)
     user_message = request.form.get("message", "").strip()
-    artifact_path = request.form.get("artifact_path", "").strip() or None
+    chat_id      = request.form.get("chat", "").strip()
 
     if not user_message:
         return jsonify({"error": "Empty message"}), 400
+    if not chat_id or not _chat_id_ok(chat_id):
+        return jsonify({"error": "Missing or invalid conversation id"}), 400
 
-    state   = _conversation_state.setdefault(project_id, {})
-    summary = state.get("summary")
-    history = state.get("history", [])
+    chat    = _load_chat(repo, chat_id)
+    history = chat["history"]
 
-    artifact_content = None
-    artifact_label   = None
-    node_id          = request.form.get("node_id", "").strip() or None
+    # First exchange names the conversation.
+    if not chat.get("title") or chat["title"] == "New conversation":
+        chat["title"] = user_message[:60]
 
-    if node_id:
-        dot_path = repo.repo_path / ".residuality" / "graph.dot"
-        graph = load_graph(str(dot_path))
-        if graph:
-            node = get_node_by_id(graph, node_id)
-            if node and node.get("file"):
-                try:
-                    file_lines = repo.read(node["file"]).splitlines()
-                    artifact_content = "\n".join(
-                        file_lines[node["line_start"]-1 : node["line_end"]]
-                    )
-                    artifact_label = f"{node['file']} :: {node_id} (lines {node['line_start']}-{node['line_end']})"
-                except Exception as e:
-                    logger.warning(f"Could not read node {node_id}: {e}")
-
-    elif artifact_path:
-        dot_path = repo.repo_path / ".residuality" / "graph.dot"
-        is_code  = any(artifact_path.endswith(ext) for ext in
-                      ('.py', '.js', '.ts', '.cpp', '.c', '.h', '.rs', '.go'))
-        if is_code and dot_path.exists():
-            graph = load_graph(str(dot_path))
-            if graph:
-                node_results = search_graph_nodes(user_message, project_id=project_id, limit=1)
-                if node_results and node_results[0].get("file") == artifact_path:
-                    best = node_results[0]
-                    try:
-                        file_lines = repo.read(artifact_path).splitlines()
-                        artifact_content = "\n".join(
-                            file_lines[best["line_start"]-1 : best["line_end"]]
-                        )
-                        artifact_label = f"{artifact_path} :: {best['node_id']} (lines {best['line_start']}-{best['line_end']})"
-                    except Exception as e:
-                        logger.warning(f"Could not read node content: {e}")
-
-        if not artifact_content:
-            try:
-                artifact_content = repo.read(artifact_path)
-                artifact_label   = artifact_path
-            except Exception:
-                pass
-
-    last_exchange    = history[-1] if history else None
-    recent_exchanges = history[-3:] if history else []
-
-    COMMIT_KEYWORDS = {
-        'commit', 'version', 'when', 'which', 'find', 'search', 'history',
-        'remember', 'worked', 'broke', 'changed', 'last', 'before', 'after',
-        'birthday', 'memory', 'recall', 'know', 'told', 'said', 'mentioned'
-    }
-    CODE_KEYWORDS = {
-        'function', 'class', 'method', 'def', 'where', 'file', 'code',
-        'implements', 'handles', 'does', 'defined', 'located'
-    }
-    words = set(user_message.lower().split())
-
-    relevant_commits   = []
-    relevant_nodes     = []
-    relevant_snapshots = []
-
-    if words & COMMIT_KEYWORDS:
-        relevant_commits   = search_commits(user_message, project_id=project_id, limit=5)
-        relevant_snapshots = search_snapshots(user_message, project_id=project_id, limit=3)
-        logger.info(f"Chat search: {len(relevant_commits)} commits, {len(relevant_snapshots)} snapshots")
-
-    if words & CODE_KEYWORDS:
-        relevant_nodes = search_graph_nodes(user_message, project_id=project_id, limit=5)
-        logger.info(f"Chat search: {len(relevant_nodes)} code nodes")
-
-    messages = ctx_builder.build_chat_context(
-        project_id=project_id,
-        user_message=user_message,
-        rolling_summary=summary,
-        last_exchange=last_exchange,
-        recent_exchanges=recent_exchanges,
-        artifact_content=artifact_content,
-        artifact_path=artifact_label or artifact_path,
-        relevant_commits=relevant_commits,
-        relevant_nodes=relevant_nodes,
-        relevant_snapshots=relevant_snapshots,
-    )
+    # Fresh context on every message; the conversation's own history on top.
+    messages = [{"role": "system",
+                 "content": "\n\n".join(_chat_context_parts(repo))}]
+    for exchange in history[-CHAT_HISTORY_LIMIT:]:
+        messages.append({"role": "user",      "content": exchange["user"]})
+        messages.append({"role": "assistant", "content": exchange["assistant"]})
+    messages.append({"role": "user", "content": user_message})
 
     try:
-        response = owui.chat(messages, model=owui.CHAT_MODEL)
+        response = owui.chat(messages, model=resolve_model(model_cfg, "planner"))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
     history.append({"user": user_message, "assistant": response})
-    if len(history) > 20:
-        history = history[-20:]
-    state["history"] = history
+    chat["history"] = history
+    _save_chat(repo, chat)
 
-    def _update_summary():
-        try:
-            summary_messages = [{
-                "role": "user",
-                "content": (
-                    f"Previous summary: {summary or 'None'}\n\n"
-                    f"New exchange:\nUser: {user_message}\n"
-                    f"Assistant: {response[:500]}\n\n"
-                    f"Write an updated 2-3 sentence summary. Return only the summary text."
-                )
-            }]
-            new_summary = owui.chat(summary_messages, model=owui.SUMMARIZER_MODEL)
-            state["summary"] = new_summary
-        except Exception as e:
-            logger.warning(f"Summary update failed: {e}")
-    threading.Thread(target=_update_summary, daemon=True).start()
-
-    return jsonify({"response": response, "summary": summary})
+    return jsonify({"response": response, "title": chat["title"]})
 
 # ── Graph ─────────────────────────────────────────────────────────────────
 
