@@ -402,10 +402,24 @@ class ArtifactRepo:
 
     # ── Branch / Merge ────────────────────────────────────────────────────
 
-    def branch(self, name: str, from_commit: str, reason: str = "") -> str:
-        """Create a new branch from a specific commit hash."""
+def branch(self, name: str, from_commit: str, reason: str = "") -> str:
+        """Create a new branch from a specific commit hash.
+
+        Args:
+            name: The name to assign to the new branch.
+            from_commit: The commit hash that the new branch will point to.
+            reason: An optional description of why this branch was created,
+                used for logging and auditability.
+
+        Returns:
+            The name of the newly created branch.
+        """
+        # Checkout the specified commit in detached HEAD mode, then create
+        # a new branch with the given name at that commit position.
         self.repo.git.checkout(from_commit, b=name)
         if reason:
+            # Log the branch creation for auditability; truncate commit hash
+            # to 8 chars to keep log lines concise.
             logger.info(f"Branch '{name}' from {from_commit[:8]}: {reason}")
         return name
 
