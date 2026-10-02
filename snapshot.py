@@ -44,7 +44,14 @@ def _embed(text: str) -> Optional[list]:
             f"{EMBED_URL}/v1/embeddings",
             json={"input": truncated_text, "model": "nomic-embed-text"},
             headers={"Content-Type": "application/json"},
-            timeout=15,  # Set timeout to prevent hanging on network issues. Extracts only the first result from potentially multiple inputs in batch mode (though we send single item here). return r.json()["data"][0]["embedding"] except Exception as e: logger.warning(f"Embed failed for text starting with '{text[:50]}...': {e}") return None
+            timeout=15,  # Set timeout to prevent hanging on network issues.
+        )
+        # Extracts only the first result from potentially multiple inputs in batch
+        # mode (though we send a single item here).
+        return r.json()["data"][0]["embedding"]
+    except Exception as e:
+        logger.warning(f"Embed failed for text starting with '{text[:50]}...': {e}")
+        return None
 
 
 def _upsert(collection: str, points: list) -> bool:

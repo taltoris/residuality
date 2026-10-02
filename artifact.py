@@ -402,7 +402,7 @@ class ArtifactRepo:
 
     # ── Branch / Merge ────────────────────────────────────────────────────
 
-def branch(self, name: str, from_commit: str, reason: str = "") -> str:
+    def branch(self, name: str, from_commit: str, reason: str = "") -> str:
         """Create a new branch from a specific commit hash.
 
         Args:
@@ -422,14 +422,8 @@ def branch(self, name: str, from_commit: str, reason: str = "") -> str:
             # to 8 chars to keep log lines concise.
             logger.info(f"Branch '{name}' from {from_commit[:8]}: {reason}")
         return name
-
-    def merge_commits(self, commit_a: str, commit_b: str,
-                      reconciled_files: dict, message: str) -> str:
-        """
-        Create a merge commit with two parents.
-        reconciled_files: {path: content} — model-reconciled content per file.
-        Returns merge commit hash.
-        """
+        
+    def merge_commits(self, commit_a: str, commit_b: str, reconciled_files: dict, message: str) -> str:
         # Write reconciled content
         for path, content in reconciled_files.items():
             full_path = self.repo_path / path
