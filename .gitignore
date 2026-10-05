@@ -13,3 +13,8 @@ export/
 .residuality/
 .env
 .DS_Store
+.env.example
+Dockerfile
+.LICENSE
+README.md
+docker-compose.yml
