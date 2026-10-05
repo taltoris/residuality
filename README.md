@@ -16,7 +16,7 @@ store). Nothing leaves your machine.
 | **Artifact store** | Every project is a real git repo under `/repos/<project_id>`. `read`, `write`, `branch`, `merge`, `checkout`, `diff` — all backed by GitPython. |
 | **Graph** | `tree-sitter` parses `.py`, `.c`/`.h`, `.cpp`/`.hpp`, `.js`/`.ts`, `.rs` and `.html`/`.htm` (plus `<!-- rs:section -->` markers in `.md`) into a DOT graph of files, classes, functions, template sections and import edges. Stored in `.residuality/graph.dot` and committed with the code. |
 | **Memory** | Each commit indexes its message and its graph nodes into Qdrant, and generates an *episodic snapshot* (state, decisions, open questions) that is also vectorised. |
-| **Plan** | The project's thinking space, and what the old Chat tab became. It holds a conversation on the *planner* model — every message sent with fresh context: the recent git log, `README.md` and an outline of `graph.dot`, plus the history of the conversation you are in — and, on demand, an **assessment**: that same context put to the model as a question about where things stand and what to do next. |
+| **Plan** | The project's thinking space, and what the old Chat tab became. It holds a conversation on the *planner* model — every message sent with fresh context: the recent git log, `README.md` and the graph summary (`.residuality/graph_summary.txt`), plus the history of the conversation you are in — and, on demand, an **assessment**: that same context put to the model as a question about where things stand and what to do next. |
 | **History** | Every commit on every branch, newest first, with parents, branches and merge markers. A literal filter narrows the list as you type; *Search by meaning* uses the vector index for when you remember the shape of a change but not its wording. From a row you can view a commit's files, branch from it, or check it out; tick two rows to diff them. |
 | **Merge** | Pick two divergent commits; the model reconciles conflicting files into a merge commit with two parents. |
 
@@ -68,6 +68,8 @@ that project's Project Control page rather than under the program-wide Settings 
 /app/context.py          # context compression for model calls
 /app/owui_client.py      # Open WebUI API client
 /app/.residuality/extract-python.scm   # tree-sitter query for Python
+<repo>/.residuality/graph.dot          # the graph, one section per file
+<repo>/.residuality/graph_summary.txt  # its prompt-sized outline (on-disk twin)
 /templates/*.html        # Jinja UI
 /static/residuality.js   # graph drill-down, gitignore, plan, file lists
 ```
@@ -189,8 +191,8 @@ see [Model settings](#model-settings).
 ## Usage
 
 1. **Create a project** — either a fresh repo or link an existing one (`/projects/new`).
-   Residuality writes `.residuality/extract-python.scm`, an empty `graph.dot`, and a default
-   `.gitignore`, then commits them as `Init project: <id>`.
+   Residuality writes `.residuality/extract-python.scm`, an empty `graph.dot` and
+   `graph_summary.txt`, and a default `.gitignore`, then commits them as `Init project: <id>`.
 2. **Build the graph** — ⚙ *Build Graph* runs tree-sitter over every `.py`/`.md`/`.html`
    (skipping `.git`, `.residuality`, `export`, and files over 500 KB) and commits the
    result.
@@ -209,8 +211,9 @@ see [Model settings](#model-settings).
    Save splices the range and leaves it dirty for Regenerate & Commit.
 5. **Plan** — the tab is this project's thinking space. The conversation runs on the
    planner model; every message carries the recent git log (last 10 commits), the
-   project's `README.md` and an outline of its `graph.dot` — files, imports and symbol
-   names, not the raw DOT — plus the history of the conversation you are in. Conversations
+   project's `README.md` and its graph summary — `.residuality/graph_summary.txt`,
+   files, imports and symbol names, not the raw DOT — plus the history of the
+   conversation you are in. Conversations
    are stored under `.residuality/chats/` (one JSON file each, surviving restarts) and
    listed in the sidebar; **+ New conversation** starts fresh with the injected context
    and none of the history from any other conversation. **Assess project state** puts that
@@ -239,8 +242,9 @@ footer and Save/Cancel on the right.
 
 **Save** splices the box's lines over that range in the working file and re-runs
 Build Graph for that one file, so only its `// --- file: ... ---` block of
-graph.dot is rewritten. It deliberately does **not** commit: the file and graph.dot
-are left dirty for Regenerate & Commit, which is also where the message comes from.
+graph.dot is rewritten (and the graph summary is re-rendered to match). It
+deliberately does **not** commit: the file, graph.dot and the summary are left
+dirty for Regenerate & Commit, which is also where the message comes from.
 A file no parser handles (Dockerfile, LICENSE, requirements.txt) still saves, and
 reports `graph unchanged`. **Cancel** reverts the node to its original state, and
 navigating out of the pane with unsaved text asks first.
@@ -422,6 +426,17 @@ Two sharp edges worth keeping in mind when adding anything here:
   and the only containment worth keeping is that a method belongs to a class.
   Line numbers are deliberately left out: the outline answers "what exists", and
   the exact span is looked up from the graph when an edit is actually made.
+- **The summary is a file, and context reads it.** The outline is written to
+  `.residuality/graph_summary.txt` — atomically, like `graph.dot` — every time a
+  graph update runs, so it is the on-disk twin of the graph. Chat and Plan read
+  that file instead of re-rendering `graph.dot` per message: what the model sees
+  is exactly what the last build produced, and the two can never drift apart.
+  A project whose graph predates the file gets it backfilled on first open
+  (`_ensure_residuality` re-renders from the existing `graph.dot`), so there is
+  no migration step. One known wrinkle: within a *batch* operation (Build Graph
+  over many files) the file is written once, mid-batch, and can trail the final
+  `graph.dot` until the next single-file update re-renders it; single-file
+  operations always leave it exact.
 - **The commit list is a table, and the drawn DAG is gone.** `/projects/<id>` used to render
   a `vis-network` graph of commit parentage. The list carries the same information — parents,
   branches, merge markers — in a form that can be filtered, searched and acted on, without a

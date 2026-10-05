@@ -37,7 +37,7 @@ from owui_client import (
 )
 from graph import (render_file_graph, render_file_detail, render_directory_graph,
                     load_graph, get_node_by_id, get_neighbors, graph_node_ranges,
-                    render_graph_summary, export_prose)
+                    export_prose)
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -586,7 +586,10 @@ def _chat_context_parts(repo: ArtifactRepo) -> list:
 
     The graph is sent as a summary rather than as graph.dot itself: the raw
     file is ~48K tokens on this repo, which is most of a conversation's budget
-    spent before the first question. See graph.render_graph_summary.
+    spent before the first question. The summary is read from
+    .residuality/graph_summary.txt — the on-disk twin written by the last
+    build — rather than re-rendered here, so context and disk can never
+    disagree. See graph.render_graph_summary.
     """
     parts = []
 
@@ -606,8 +609,7 @@ def _chat_context_parts(repo: ArtifactRepo) -> list:
         parts.append("## README.md\n(not present in this project)")
 
     try:
-        dot_path = repo.repo_path / ".residuality" / "graph.dot"
-        summary  = render_graph_summary(str(dot_path))
+        summary = repo.graph_summary_text()
         if summary:
             parts.append(f"## Project Structure\n{summary}")
         else:
@@ -745,7 +747,6 @@ def plan_assess(project_id: str):
     client says which parts were missing rather than failing the request.
     """
     repo     = get_repo(project_id)
-    dot_path = str(repo.repo_path / ".residuality" / "graph.dot")
 
     snapshot = None
     try:
@@ -757,8 +758,7 @@ def plan_assess(project_id: str):
 
     graph_summary = None
     try:
-        if Path(dot_path).exists():
-            graph_summary = render_graph_summary(dot_path)
+        graph_summary = repo.graph_summary_text()
     except Exception as e:
         logger.warning(f"Plan: graph summary failed for {project_id}: {e}")
 

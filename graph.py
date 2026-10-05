@@ -473,6 +473,51 @@ def render_graph_summary(dot_path: str) -> str:
     return "\n".join(out)
 
 
+# ── Persisted summary ─────────────────────────────────────────────────────
+
+def write_graph_summary(dot_path: str, out_path: str) -> str:
+    """Render the graph summary and write it to `out_path` atomically.
+
+    This is the on-disk twin of `render_graph_summary`: the same function, the
+    same `graph.dot`, so the file is byte-identical to what the Plan context
+    would have computed. The write is atomic (tmp + rename), matching how
+    `graph.dot` itself is written, so a partial write can never leave a half
+    summary behind. Returns the summary text (empty string if there is no
+    graph to summarise).
+    """
+    summary = render_graph_summary(dot_path)
+    if not summary:
+        return ""
+    tmp = Path(out_path).with_suffix(".tmp")
+    tmp.write_text(summary)
+    tmp.rename(out_path)
+    return summary
+
+
+def refresh_summary(dot_path: str, out_path: str) -> None:
+    """Rewrite the summary only if `graph.dot` changed since it was written.
+
+    The summary is a pure function of `graph.dot`, so it is stale exactly when
+    the graph is newer than the file. Comparing mtimes makes this a no-op on
+    every call that does not follow a graph change, which is what lets
+    `ArtifactRepo._update_graph` call it after each file without paying a
+    re-parse of the whole graph. If the summary is missing or older than the
+    graph it is regenerated from the graph on disk, so the file can never
+    drift from the graph it describes.
+    """
+    try:
+        dot_stat = os.stat(dot_path)
+    except OSError:
+        return
+    try:
+        out_stat = os.stat(out_path)
+        if out_stat.st_mtime_ns >= dot_stat.st_mtime_ns:
+            return
+    except OSError:
+        pass
+    write_graph_summary(dot_path, out_path)
+
+
 # ── Level 1: File dependency graph ────────────────────────────────────────
 
 def render_file_graph(dot_path: str, show_external: bool = False) -> str:

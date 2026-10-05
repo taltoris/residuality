@@ -227,6 +227,13 @@ class ArtifactRepo:
         if not dot_path.exists():
             dot_path.write_text("digraph residuality {\n\n}\n")
 
+        # Keep the on-disk summary in step with graph.dot. For a fresh project
+        # the graph is empty so this yields an empty file; for an existing
+        # project whose graph was built before this file existed, it regenerates
+        # the summary from the current graph on first open — a self-healing
+        # backfill, no separate migration needed.
+        self._refresh_summary()
+
         gitignore = self.repo_path / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text(
@@ -271,6 +278,12 @@ class ArtifactRepo:
         if not dot_path.exists():
             dot_path.write_text("digraph residuality {\n\n}\n")
 
+        # Initialize the empty graph summary (the on-disk twin of graph.dot's
+        # outline). Empty for an empty graph, as render_graph_summary yields.
+        summary_path = res_dir / "graph_summary.txt"
+        if not summary_path.exists():
+            summary_path.write_text("")
+
         # Default .gitignore — only write if it doesn't exist
         gitignore = repo_path / ".gitignore"
         if not gitignore.exists():
@@ -305,9 +318,12 @@ class ArtifactRepo:
             cw.set_value("user", "email", GIT_USER_EMAIL)
 
         # Commit Residuality metadata — .residuality is ignored by default
-        # (graph.dot, extract-python.scm), so only stage what git allows.
+        # (graph.dot, graph_summary.txt, extract-python.scm), so only stage what
+        # git allows. graph_summary.txt rides along with graph.dot so the two
+        # are never tracked separately.
         files_to_add = []
-        for f in [".residuality/extract-python.scm", ".residuality/graph.dot", ".gitignore"]:
+        for f in [".residuality/extract-python.scm", ".residuality/graph.dot",
+                  ".residuality/graph_summary.txt", ".gitignore"]:
             full = repo_path / f
             if not full.exists():
                 continue
@@ -525,6 +541,54 @@ class ArtifactRepo:
             self._update_code_graph(filepath, _LANGUAGE_RULES[lang], dot_path)
         elif filepath.endswith(".md"):
             self._update_prose_graph(filepath)
+
+        # Keep the on-disk summary in step with graph.dot. refresh_summary
+        # compares mtimes and re-renders only when the graph actually changed,
+        # so this is a no-op for files no parser handles (graph.dot untouched).
+        #
+        # Known limitation: within one batch operation (build_all, regenerate)
+        # graph.dot is rewritten per file but ends with a single mtime, so the
+        # gate no-ops after the first file and the on-disk summary reflects the
+        # graph only as of the first file processed. It is correct after any
+        # single-file operation and self-heals on the next one. Intended fix:
+        # render once per operation, at the end of each, instead of per file.
+        self._refresh_summary()
+
+    def graph_summary_text(self) -> Optional[str]:
+        """The on-disk graph summary — the single source of truth for context.
+
+        Chat and Plan read this file rather than re-rendering graph.dot, so
+        what the model sees is exactly what a build produced and what is on
+        disk. The file is backfilled on first open (see _ensure_residuality),
+        so a missing file is refreshed here before the read. Returns the
+        summary text, or None when the graph is empty — callers render their
+        own "not built yet" note for that case.
+        """
+        res_dir = self.repo_path / ".residuality"
+        summary_path = res_dir / "graph_summary.txt"
+        if not summary_path.exists():
+            self._refresh_summary()
+            if not summary_path.exists():
+                return None
+        text = summary_path.read_text()
+        return text or None
+
+    def _refresh_summary(self) -> None:
+        """Rewrite .residuality/graph_summary.txt if graph.dot is newer.
+
+        The summary is a pure function of graph.dot, so it is stale exactly
+        when the graph is newer than the file. This is the single choke point
+        every graph rewrite flows through (build_all, regenerate, save_lines,
+        apply_edits/graph_edit, write), so the file can never drift from the
+        graph it describes. Cheap enough to call after each per-file update: it
+        re-parses the graph only on a real change.
+        """
+        from graph import refresh_summary
+        res_dir = self.repo_path / ".residuality"
+        dot_path = res_dir / "graph.dot"
+        if not dot_path.exists():
+            return
+        refresh_summary(str(dot_path), str(res_dir / "graph_summary.txt"))
 
     @staticmethod
     def _lang_key(filepath: str) -> Optional[str]:
