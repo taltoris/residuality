@@ -193,6 +193,12 @@ def account():
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def list_projects() -> list:
+    """List all initialized projects in the repositories directory.
+
+    Scans REPOS_PATH for subdirectories that contain a .git folder,
+    treating each as a project. Returns metadata including whether the
+    project has been processed by residuality (indicated by graph.dot).
+    """
     repos = Path(REPOS_PATH)
     repos.mkdir(parents=True, exist_ok=True)
     projects = []
