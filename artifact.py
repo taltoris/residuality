@@ -472,6 +472,7 @@ class ArtifactRepo:
         commit without a drawn graph.
         """
         commits = list(self.repo.iter_commits("--all"))
+        #this is a test comment
         nodes = []
         for c in commits:
             # Determine branch name(s)
