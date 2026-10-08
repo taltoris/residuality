@@ -13,12 +13,17 @@ import requests
 from pathlib import Path
 from typing import Optional
 
+import owui_client
+
 logger = logging.getLogger(__name__)
 
 QDRANT_URL        = os.getenv("QDRANT_URL",  "http://192.168.0.100:6333")
-EMBED_URL         = os.getenv("EMBED_URL",   "http://192.168.0.100:8090")
 COLLECTION_PREFIX = os.getenv("QDRANT_COLLECTION_PREFIX", "res")
-VECTOR_DIM        = 768
+
+# The embedding call itself lives in owui_client.py, shared with indexer.py. It
+# used to live here as well, along with a hardcoded VECTOR_DIM — which is how a
+# 768-wide collection got handed 1024-wide vectors. The width now comes off the
+# vector that comes back.
 
 
 def snapshots_collection(project_id: str) -> str:
@@ -27,35 +32,10 @@ def snapshots_collection(project_id: str) -> str:
 
 # ── Qdrant helpers ────────────────────────────────────────────────────────
 
-def _embed(text: str) -> Optional[list]:
-    """Generate a vector embedding for the given text using the Nomic model.
-
-    Args:
-        text: The input string to embed (truncated to 2048 characters).
-
-    Returns:
-        A list of floats representing the embedding, or None if an error occurs.
-    """
-    try:
-        # Truncate input to fit within token/character limits of the model API endpoint.
-        truncated_text = text[:2048]
-
-        r = requests.post(
-            f"{EMBED_URL}/api/embeddings",
-            json={"input": truncated_text, "model": "nomic-embed-text"},
-            headers={"Content-Type": "application/json"},
-            timeout=15,  # Set timeout to prevent hanging on network issues.
-        )
-        # Extracts only the first result from potentially multiple inputs in batch
-        # mode (though we send a single item here).
-        return r.json()["data"][0]["embedding"]
-    except Exception as e:
-        logger.warning(f"Embed failed for text starting with '{text[:50]}...': {e}")
-        return None
-
-
-def _upsert(collection: str, points: list) -> bool:
-    _ensure_collection(collection)
+def _upsert(collection: str, points: list, dim: int) -> bool:
+    """Write points, having first ensured the collection exists at `dim`."""
+    if not _ensure_collection(collection, dim):
+        return False
     try:
         r = requests.put(
             f"{QDRANT_URL}/collections/{collection}/points",
@@ -69,23 +49,49 @@ def _upsert(collection: str, points: list) -> bool:
         return False
 
 
-def _ensure_collection(name: str) -> None:
+def _ensure_collection(name: str, dim: int) -> bool:
+    """Ensure a snapshot collection exists at `dim` dimensions.
+
+    Same rule as the indexer's copy of this function: the width is passed in
+    from the vector that was just embedded, never assumed, and an existing
+    collection of a different width is refused with a message that names the
+    fix rather than being written to.
+    """
     try:
         r = requests.get(f"{QDRANT_URL}/collections/{name}", timeout=10)
         if r.status_code == 404:
             requests.put(
                 f"{QDRANT_URL}/collections/{name}",
-                json={"vectors": {"dense": {"size": VECTOR_DIM, "distance": "Cosine"}}},
+                json={"vectors": {"dense": {"size": dim, "distance": "Cosine"}}},
                 headers={"Content-Type": "application/json"},
                 timeout=15,
             )
-            logger.info(f"Created collection: {name}")
+            logger.info(f"Created collection: {name} ({dim} dimensions)")
+            return True
+        if r.status_code != 200:
+            logger.warning(f"Collection check for {name} returned {r.status_code}")
+            return False
+
+        vectors = (r.json().get("result", {}).get("config", {})
+                   .get("params", {}).get("vectors", {}))
+        existing = (vectors.get("dense") or {}).get("size")
+        if existing and existing != dim:
+            logger.error(
+                f"Collection {name} is {existing}-dimensional but the embedding "
+                f"model returns {dim}. Delete the collection to rebuild it at "
+                f"{dim} — its vectors came from a different model and cannot be "
+                f"reused."
+            )
+            return False
+        return True
     except Exception as e:
-        logger.warning(f"Collection check failed: {e}")
+        logger.warning(f"Collection check failed for {name}: {e}")
+        return False
 
 
 def ensure_collection() -> None:
-    """No-op — snapshot collections are created lazily per project."""
+    """No-op — snapshot collections are created lazily per project, on first
+    write, at the width of the vector that write is actually carrying."""
     pass
 
 
@@ -120,7 +126,10 @@ Based on the commit message and recent context, generate a state-of-affairs snap
 Commit message: {commit_message}
 Recent summary: {summary}
 
-Return ONLY raw JSON:
+Return ONLY raw JSON — no prose, no markdown fences, and do NOT ask any
+clarifying questions or request more context. Answer from the commit message
+and summary alone; if information is missing, state your best inference in the
+relevant field rather than asking for it.
 {{
   "state": "1-2 sentence description of where the project stands right now",
   "current_task": "what is being worked on",
@@ -136,7 +145,10 @@ Based on the commit message and recent context, generate a narrative state snaps
 Commit message: {commit_message}
 Recent summary: {summary}
 
-Return ONLY raw JSON:
+Return ONLY raw JSON — no prose, no markdown fences, and do NOT ask any
+clarifying questions or request more context. Answer from the commit message
+and summary alone; if information is missing, state your best inference in the
+relevant field rather than asking for it.
 {{
   "state": "1-2 sentence description of where the story stands",
   "reader_knows": ["key facts the reader now knows"],
@@ -148,6 +160,23 @@ Return ONLY raw JSON:
 }}"""
 
 
+# A reply that is not a snapshot: models that ask clarifying questions instead
+# of answering (some chat-tuned models do this) return an object shaped like
+# {"questions": [...]}. It parses as valid JSON but has no state to store, so it
+# must be rejected rather than stored as an empty snapshot.
+_QUESTION_KEYS = {"questions", "question", "clarify", "clarification", "ask_user"}
+
+
+def _looks_like_question(data) -> bool:
+    if isinstance(data, list):
+        return any(_looks_like_question(d) for d in data)
+    if not isinstance(data, dict):
+        return False
+    if _QUESTION_KEYS & set(data.keys()):
+        return True
+    return any(_looks_like_question(v) for v in data.values())
+
+
 def generate_snapshot(
     project_id: str,
     commit_hash: str,
@@ -157,7 +186,13 @@ def generate_snapshot(
     owui_client,
     summarizer_model: str,
 ) -> Optional[dict]:
-    """Generate a snapshot using the summarizer model."""
+    """Generate a snapshot using the given model.
+
+    Returns a dict with at least a non-empty ``state`` key, or None when the
+    model is unreachable, returns unparseable text, or answers with a
+    clarifying question instead of a snapshot. Callers treat None as "no
+    snapshot yet", not as a crash.
+    """
     import json, re
 
     prompt_template = (
@@ -177,14 +212,29 @@ def generate_snapshot(
         # Strip markdown fences
         clean = re.sub(r'```json|```', '', response).strip()
         data  = json.loads(clean)
-        data["project_type"]   = project_type
-        data["commit_hash"]    = commit_hash
-        data["commit_message"] = commit_message
-        data["project_id"]     = project_id
-        return data
     except Exception as e:
         logger.warning(f"Snapshot generation failed: {e}")
         return None
+
+    if not isinstance(data, dict) or not str(data.get("state", "")).strip():
+        logger.warning(
+            f"Snapshot model returned no usable 'state' field "
+            f"(model={summarizer_model}); got: {str(data)[:200]!r}"
+        )
+        return None
+    if _looks_like_question(data):
+        logger.warning(
+            f"Snapshot model asked a clarifying question instead of answering "
+            f"(model={summarizer_model}); refusing to store it. Point the default "
+            f"model at one that follows the 'return ONLY raw JSON' instruction."
+        )
+        return None
+
+    data["project_type"]   = project_type
+    data["commit_hash"]    = commit_hash
+    data["commit_message"] = commit_message
+    data["project_id"]     = project_id
+    return data
 
 
 def store_snapshot(
@@ -195,19 +245,30 @@ def store_snapshot(
     turn: int,
     timestamp: int,
 ) -> bool:
-    """Store a snapshot in Qdrant."""
+    """Store a snapshot in Qdrant.
+
+    Returns True on success, or a short reason string on failure so the caller
+    can say *which* stage broke — an embedding-service outage and a Qdrant
+    upsert error are different fixes, and collapsing both into False is what
+    made the UI show a generic 'may be down' with no way to tell them apart.
+
+    The failure string is the embedder's own sentence rather than a
+    paraphrase. It used to read "embedding service unreachable", which sent
+    two rounds of diagnosis after the wrong thing: the endpoint was up and
+    answering, and what it was saying was that the request named no model.
+    """
     # Embed the state description as the semantic anchor
     state_text = snapshot.get("state", commit_message)
-    vector = _embed(state_text)
+    vector = owui_client.embed(state_text)
     if not vector:
-        return False
+        return f"could not vectorize the snapshot — {owui_client.embed_last_error()}"
 
     point_id = str(uuid.uuid5(
         uuid.NAMESPACE_DNS,
         f"snapshot-{project_id}-{commit_hash}"
     ))
 
-    return _upsert(snapshots_collection(project_id), [{
+    ok = _upsert(snapshots_collection(project_id), [{
         "id":     point_id,
         "vector": {"dense": vector},
         "payload": {
@@ -218,7 +279,8 @@ def store_snapshot(
             "timestamp":      timestamp,
             **snapshot,
         }
-    }])
+    }], len(vector))
+    return True if ok else f"Qdrant upsert failed for collection {snapshots_collection(project_id)}"
 
 
 def _snapshot_from_payload(payload: dict, score: Optional[float] = None) -> dict:
@@ -257,8 +319,9 @@ def search_snapshots(
     limit: int = 5,
 ) -> list:
     """Semantic search over project snapshots."""
-    vector = _embed(query)
+    vector = owui_client.embed(query)
     if not vector:
+        logger.warning(f"Snapshot search unavailable: {owui_client.embed_last_error()}")
         return []
 
     payload = {

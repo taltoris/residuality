@@ -12,6 +12,8 @@ The roles, in the order they matter here:
   edit        override for AI-assisted edits     ("" = follow default)
   planner     the Plan tab: conversations and assessments
   summarizer  commit messages + rolling summaries
+  embed       the embedding model, for memory and snapshots (the call itself
+              is made by `embed()` at the bottom of this file)
 
 Note on `chat`: it is retained and still saved, but nothing reads it. The Plan
 tab runs on `planner`, and `chat()` takes its model per call (falling back to
@@ -38,6 +40,19 @@ OWUI_API_KEY     = os.getenv("OWUI_API_KEY",      "")
 DEFAULT_MODEL    = os.getenv("OWUI_MODEL",         "/models/diffusiongemma")
 SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL",   "/models/diffusiongemma")
 PLANNER_MODEL    = os.getenv("PLANNER_MODEL",      "Qwen3.5-9B-Q4_0.gguf")
+
+# Embeddings: same endpoint and key by default, because Open WebUI serves
+# `/api/v1/embeddings` alongside chat. `embed_model` is what the request names;
+# blank sends no model field and lets the endpoint pick its default. These are
+# *settings* (spent by `embed()` at the bottom of this file) because both of a
+# modelless request and a wrong-width collection look nothing like their cause
+# from the UI.
+EMBED_URL        = os.getenv("EMBED_URL",   OWUI_URL)
+EMBED_MODEL      = os.getenv("EMBED_MODEL", "")
+# The request path is where the two things this can point at disagree, so it is
+# its own setting: Open WebUI serves /api/v1/embeddings, a standalone llama.cpp
+# server serves /v1/embeddings. Blank means Open WebUI's path.
+EMBED_PATH       = os.getenv("EMBED_PATH",  "")
 
 CONFIG_FILENAME  = "residuality_models.cfg"
 
@@ -108,6 +123,9 @@ def load_config() -> dict:
         "max_edit_chars": os.getenv("MAX_EDIT_NODE_CHARS", ""),   # "" = from window
         "owui_url":     OWUI_URL,
         "owui_api_key": OWUI_API_KEY,
+        "embed_url":    EMBED_URL,
+        "embed_model":  EMBED_MODEL,   # "" = let the endpoint choose
+        "embed_path":   EMBED_PATH,    # "" = /api/v1/embeddings
     }
 
     path = config_path()
@@ -713,3 +731,147 @@ class OWUIClient:
                 "risks": str(e),
                 "open_questions": [],
             }
+
+
+# ── Embeddings ────────────────────────────────────────────────────────────
+#
+# The indexer and the snapshot store both need a dense vector, and they each
+# carried their own near-identical copy of `_embed`. They also carried the same
+# two assumptions, and both of them quietly stopped being true:
+#
+#   * The request never named a model. The old comment read "OWUI routes the
+#     request to whichever embedding model is registered", which holds only
+#     while exactly one is. An Open WebUI whose *default* embedding model is
+#     unset -- or points at something it cannot load -- answers a model-less
+#     `/api/v1/embeddings` with a bare `500 Internal Server Error`, and the
+#     reply says nothing about why. Snapshots then failed with "embedding
+#     service unreachable", which was true of the request and misleading about
+#     the cause: the service was up and answering as soon as a model was named.
+#
+#   * The vector width was a hardcoded 768. That is nomic-embed-text's width,
+#     which is where the number came from; Qwen3-Embedding-0.6B is 1024. A
+#     collection created at the wrong width rejects every single write, so the
+#     failure moves rather than disappears when the request is fixed. Nothing
+#     here assumes a width: each collection is created at the size of the vector
+#     actually returned (see `_ensure_collection` in indexer.py / snapshot.py).
+#
+# This lives here rather than in a module of its own because of how the
+# container gets its code: `docker-compose.yml` mounts the source one file at a
+# time and `Dockerfile` copies none of it -- only requirements.txt -- so a new
+# module that nobody adds to that list is not merely unimported, it does not
+# exist inside the container, and the app dies on startup with
+# `ModuleNotFoundError`. This file is already mounted, already owns the config
+# file, and is already what the indexer and the snapshot store import.
+#
+# Settings resolve the way the model slots do: environment first, config file
+# layered over it, blank meaning *hand it back to .env*.
+
+EMBED_DEFAULT_URL  = "http://192.168.0.100:8282"   # Open WebUI
+EMBED_DEFAULT_PATH = "/api/v1/embeddings"          # its OpenAI-compatible path
+
+# Characters sent per request. The old code truncated to 2048 and the embedding
+# models here all hold at least a few thousand tokens, so the ceiling is kept
+# rather than raised: it is not what is limiting anything, and a snapshot's
+# `state` is two sentences.
+EMBED_MAX_CHARS = 2048
+
+_embed_url   = ""
+_embed_path  = ""
+_embed_model = ""
+_embed_key   = ""
+_embed_error = ""
+
+
+def reload_embedding() -> None:
+    """Re-read the embedding settings. Called on import and on every save."""
+    global _embed_url, _embed_path, _embed_model, _embed_key
+
+    url   = os.getenv("EMBED_URL") or OWUI_URL
+    path  = os.getenv("EMBED_PATH") or EMBED_DEFAULT_PATH
+    model = os.getenv("EMBED_MODEL", "")
+    # EMBED_API_KEY exists for a server that wants its own key; otherwise this is
+    # the same Open WebUI endpoint as chat, so the OWUI key is the right one.
+    key   = os.getenv("EMBED_API_KEY") or OWUI_API_KEY
+
+    cfg   = load_config()
+    url   = (cfg.get("embed_url")   or url).strip()   or url
+    path  = (cfg.get("embed_path")  or path).strip()  or path
+    model = (cfg.get("embed_model") or model).strip() or model
+    key   = key or (cfg.get("owui_api_key") or "")
+
+    _embed_url   = url.rstrip("/")
+    _embed_path  = "/" + path.strip("/")
+    _embed_model = model
+    _embed_key   = key
+    logger.info(f"Embeddings: {embed_describe()}")
+
+
+def embed_config() -> dict:
+    """What the embedding calls are actually using, for the settings page."""
+    return {
+        "url":         _embed_url,
+        "path":        _embed_path,
+        "model":       _embed_model,
+        "api_key_set": bool(_embed_key),
+    }
+
+
+def embed_describe() -> str:
+    """A one-line "what, where" -- logged at startup and shown in the UI."""
+    return f"{_embed_model or '(endpoint default model)'} at {_embed_url}{_embed_path}"
+
+
+def embed_last_error() -> str:
+    """Why the most recent `embed()` returned None. Empty when it did not."""
+    return _embed_error
+
+
+def embed(text: str) -> Optional[list]:
+    """A dense vector for `text`, or None with the reason in `embed_last_error()`.
+
+    The `model` field is the whole point of this function existing in one place.
+    It is sent whenever one is configured; blank leaves it out, which is what an
+    install with a single registered embedding model wants.
+    """
+    global _embed_error
+    _embed_error = ""
+
+    endpoint = f"{_embed_url}{_embed_path}"
+    body = {"input": text[:EMBED_MAX_CHARS]}
+    if _embed_model:
+        body["model"] = _embed_model
+
+    headers = {"Content-Type": "application/json"}
+    if _embed_key:
+        headers["Authorization"] = f"Bearer {_embed_key}"
+
+    try:
+        r = requests.post(endpoint, json=body, headers=headers, timeout=15)
+    except Exception as e:
+        _embed_error = f"could not reach {endpoint}: {e}"
+        logger.warning(f"Embed failed: {_embed_error}")
+        return None
+
+    if r.status_code != 200:
+        # The body is carried into the message on purpose: a 500 here is opaque
+        # ("Internal Server Error") and a 400 is specific ("Pooling type 'none'
+        # is not OAI compatible"), and that difference is the entire diagnosis.
+        _embed_error = f"{endpoint} answered {r.status_code}: {r.text[:200]}"
+        if not _embed_model:
+            _embed_error += (" -- no embedding model is configured; set one in "
+                             "Settings or EMBED_MODEL in .env")
+        logger.warning(f"Embed failed at {endpoint} (model={_embed_model or '(none sent)'}): "
+                       f"{r.status_code} {r.text[:200]}")
+        return None
+
+    try:
+        return r.json()["data"][0]["embedding"]
+    except Exception as e:
+        _embed_error = f"{endpoint} returned no embedding: {e}"
+        logger.warning(f"Embed failed: {_embed_error}")
+        return None
+
+
+# Read once at import so a process that never opens the settings page still has
+# its endpoint; `reload_model_config` calls this again on every save.
+reload_embedding()

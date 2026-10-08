@@ -11,6 +11,7 @@
     <p style="font-size:0.8rem;color:#8b949e;margin-bottom:0.75rem;">
         In force now —
         <span style="color:#58a6ff;font-family:monospace;">default: {{ model_cfg.get('default','') }}</span>
+        <span style="color:#8b949e;">· embed: </span><span style="color:#58a6ff;font-family:monospace;">{{ embed.model or '(endpoint default)' }}</span>
         {% if resolved_edit != model_cfg.get('default','') %}
             <span style="color:#8b949e;">· edit: </span><span style="color:#58a6ff;font-family:monospace;">{{ resolved_edit }}</span>
         {% endif %}
@@ -49,6 +50,36 @@
                 <input id="s-key" name="owui_api_key" type="password" value=""
                        autocomplete="new-password"
                        placeholder="{{ '•••••• stored — blank keeps it' if api_key_set else 'not set' }}">
+            </div>
+            <div>
+                <label for="s-embed">Embedding model <span style="color:#484f58;">(memory + snapshots)</span></label>
+                <select id="s-embed" name="embed_model">
+                    <option value="{{ model_cfg.get('embed_model','') }}" selected>{{ model_cfg.get('embed_model','') or 'let the endpoint choose' }}</option>
+                </select>
+                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
+                    Named in every embeddings request. Blank sends no model and asks the
+                    endpoint to pick its default — which answers <code>500</code> if it has
+                    no default embedding model, so put one here unless you know it has.
+                </p>
+            </div>
+            <div>
+                <label for="s-embedurl">Embedding endpoint <span style="color:#484f58;">(defaults to the endpoint above)</span></label>
+                <input id="s-embedurl" name="embed_url"
+                       value="{{ model_cfg.get('embed_url','') }}"
+                       placeholder="{{ embed.url }}">
+            </div>
+            <div>
+                <label for="s-embedpath">Embedding path <span style="color:#484f58;">(defaults to /api/v1/embeddings)</span></label>
+                <input id="s-embedpath" name="embed_path"
+                       value="{{ model_cfg.get('embed_path','') }}"
+                       placeholder="/api/v1/embeddings">
+                <p style="font-size:0.7rem;color:#8b949e;margin-top:2px;">
+                    In force now: <code>{{ embed.model or '(endpoint default)' }}</code>
+                    at <code>{{ embed.url }}{{ embed.path }}</code>{% if embed.api_key_set %} with the API key{% endif %}.
+                    Open WebUI serves <code>/api/v1/embeddings</code>; a standalone
+                    llama.cpp server serves <code>/v1/embeddings</code> instead. Set this
+                    only if you are pointing the endpoint above at the latter.
+                </p>
             </div>
             <div>
                 <label for="s-ctx">Context window <span style="color:#484f58;">(tokens)</span></label>
@@ -130,7 +161,17 @@
 // dropdown with an explanation rather than an empty control.
 (function() {
     var status = document.getElementById('s-model-status');
-    var SLOTS  = ['s-default', 's-chat', 's-edit', 's-planner', 's-summarizer'];
+    // A dropdown per slot, with the label its blank value deserves: blank is a
+    // real value in every one of these (it hands the slot back to the default or
+    // to .env), and for the embedding model it means "send no model field".
+    var SLOTS  = [
+        ['s-default',    '(blank - follow the default / .env)'],
+        ['s-chat',       '(blank - follow the default / .env)'],
+        ['s-edit',       '(blank - follow the default / .env)'],
+        ['s-planner',    '(blank - follow the default / .env)'],
+        ['s-summarizer', '(blank - follow the default / .env)'],
+        ['s-embed',      '(blank - let the endpoint choose)']
+    ];
 
     function esc(s) {
         return String(s == null ? '' : s)
@@ -142,10 +183,10 @@
     // hands the slot back to the default or to .env. Each slot is rendered with
     // its saved value already in it, so if this fetch never lands the form still
     // posts what was stored rather than posting nothing at all.
-    function fill(id, models) {
+    function fill(id, blankLabel, models) {
         var sel     = document.getElementById(id);
         var current = sel.value;
-        var html    = '<option value="">(blank - follow the default / .env)</option>';
+        var html    = '<option value="">' + esc(blankLabel) + '</option>';
         var seen    = false;
         models.forEach(function(m) {
             if (m.id === current) seen = true;
@@ -166,7 +207,7 @@
             .then(function(r) { return r.json(); })
             .then(function(d) {
                 var models = d.models || [];
-                SLOTS.forEach(function(id) { fill(id, models); });
+                SLOTS.forEach(function(slot) { fill(slot[0], slot[1], models); });
                 if (d.error) {
                     status.textContent = 'models unavailable — ' + d.error;
                     status.style.color = '#d29922';

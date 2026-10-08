@@ -113,7 +113,7 @@
     <h1>Project Control — {{ project_id }}</h1>
     <div style="display:flex;gap:0.5rem;">
         <button class="btn" id="build-all-btn">&#9881; Build Graph</button>
-        <button class="btn" id="snapshot-btn" title="Generate an episodic snapshot of the current state (uses the summarizer model)">&#128274; Snapshot</button>
+        <button class="btn" id="snapshot-btn" title="Generate an episodic snapshot of the current state (uses the default model)">&#128274; Snapshot</button>
         <button class="btn btn-primary" id="regen-btn">&#8635; Regenerate &amp; Commit</button>
     </div>
 </div>
@@ -456,7 +456,7 @@
         btn.disabled    = true;
         btn.textContent = 'Generating...';
         status.style.color = '#8b949e';
-        status.textContent = 'Asking the summarizer model for a state-of-affairs snapshot...';
+        status.textContent = 'Asking the default model for a state-of-affairs snapshot...';
 
         fetch('/projects/'+PID+'/snapshot/generate', {method:'POST'})
             .then(function(r){ return r.json(); })
@@ -488,7 +488,11 @@
                                 clearInterval(timer);
                                 btn.disabled    = false;
                                 btn.textContent = '📴 Snapshot';
-                                status.textContent = 'Still no snapshot — the model or embedding service may be down. Check the server log.';
+                                if (sd.error) {
+                                    status.textContent = 'No snapshot — ' + sd.error;
+                                } else {
+                                    status.textContent = 'Still no snapshot — the model or embedding service may be down. Check the server log.';
+                                }
                                 status.style.color = '#d29922';
                             }
                         })

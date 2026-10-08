@@ -34,6 +34,7 @@ from owui_client import (
     OWUIClient, load_config, save_config, config_path, apply_model_config,
     resolve_model, resolve_max_edit_chars, list_models, strip_think, strip_code_fence,
     plan_edit_chunks, DEFAULT_EDIT_PROMPT, CONFIG_FILENAME, CONTEXT_TOKENS,
+    reload_embedding, embed_config,
 )
 from graph import (render_file_graph, render_file_detail, render_directory_graph,
                     load_graph, get_node_by_id, get_neighbors, graph_node_ranges,
@@ -104,6 +105,11 @@ def reload_model_config() -> dict:
     global model_cfg
     model_cfg = load_config()
     apply_model_config(owui, model_cfg)
+    # The embedding settings are read by the embed() block at the bottom of this
+    # module rather than by the client above (the indexer and snapshot store call
+    # it directly), so it has to be told too — otherwise a saved embed model
+    # would not take effect until a restart.
+    reload_embedding()
     return model_cfg
 
 
@@ -309,6 +315,7 @@ def settings_context() -> dict:
         "edit_prompt_default": DEFAULT_EDIT_PROMPT,
         "context_tokens_default": CONTEXT_TOKENS,
         "resolved_max_edit_chars": resolve_max_edit_chars(cfg),
+        "embed":                  embed_config(),
     }
 
 
@@ -337,7 +344,8 @@ def settings_models():
     cfg = load_config()
 
     for field in ("default", "chat", "edit", "planner", "summarizer",
-                  "edit_prompt", "owui_url"):
+                  "edit_prompt", "owui_url", "embed_url", "embed_model",
+                  "embed_path"):
         if field in request.form:
             cfg[field] = request.form.get(field, "").strip()
 
@@ -1851,6 +1859,14 @@ def graph_image_replace(project_id: str):
 
 # ── Snapshots ─────────────────────────────────────────────────────────────
 
+# The last reason a manual snapshot failed, per project. The generate button
+# runs in a background thread and answers immediately, so the only channel back
+# to the UI is this status route — without it, a failure collapses into the
+# generic "may be down" line with no way to tell an embedding outage from a
+# model that answered with a question instead of a snapshot.
+_snapshot_failures = {}
+
+
 @app.route("/projects/<project_id>/snapshot/generate", methods=["POST"])
 @login_required
 def generate_snapshot_now(project_id: str):
@@ -1869,6 +1885,7 @@ def generate_snapshot_now(project_id: str):
     the thread logs the failure and the status line reports it.
     """
     repo = get_repo(project_id)
+    _snapshot_failures.pop(project_id, None)   # a fresh attempt clears the old reason
 
     def _generate():
         try:
@@ -1886,6 +1903,11 @@ def generate_snapshot_now(project_id: str):
                 summarizer_model = resolve_model(model_cfg, "default"),
             )
             if not snapshot:
+                _snapshot_failures[project_id] = (
+                    f"the default model ({resolve_model(model_cfg, 'default')}) returned "
+                    f"no usable snapshot — it may have asked a clarifying question or "
+                    f"refused the JSON format. Check the server log for its reply."
+                )
                 logger.warning(f"Snapshot generation returned nothing for {project_id}")
                 return
             stored = store_snapshot(
@@ -1896,10 +1918,15 @@ def generate_snapshot_now(project_id: str):
                 turn           = 0,
                 timestamp      = head.committed_date,
             )
-            if stored:
+            if stored is True:
+                _snapshot_failures.pop(project_id, None)
                 logger.info(f"Manual snapshot stored for {project_id} @ {commit_hash[:8]}: "
                             f"{snapshot.get('state', '')[:80]}")
+            else:
+                _snapshot_failures[project_id] = stored
+                logger.warning(f"Manual snapshot not stored for {project_id}: {stored}")
         except Exception as e:
+            _snapshot_failures[project_id] = str(e)
             logger.warning(f"Manual snapshot failed for {project_id}: {e}")
 
     threading.Thread(target=_generate, daemon=True).start()
@@ -1918,7 +1945,8 @@ def snapshot_status(project_id: str):
     """
     snap = latest_snapshot(project_id)
     if not snap:
-        return jsonify({"has_snapshot": False, "snapshot": None})
+        return jsonify({"has_snapshot": False, "snapshot": None,
+                        "error": _snapshot_failures.get(project_id)})
     return jsonify({"has_snapshot": True, "snapshot": snap})
 
 

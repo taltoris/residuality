@@ -66,7 +66,7 @@ that project's Project Control page rather than under the program-wide Settings 
 /app/indexer.py          # Qdrant upsert/search (commits + graph nodes)
 /app/snapshot.py         # episodic snapshot generation + storage
 /app/context.py          # context compression for model calls
-/app/owui_client.py      # Open WebUI API client
+/app/owui_client.py      # Open WebUI API client + the one place text becomes a vector
 /app/.residuality/extract-python.scm   # tree-sitter query for Python
 <repo>/.residuality/graph.dot          # the graph, one section per file
 <repo>/.residuality/graph_summary.txt  # its prompt-sized outline (on-disk twin)
@@ -174,7 +174,10 @@ Required env (defaults in parentheses):
 | `QDRANT_URL` | `http://192.168.0.100:6333` |
 | `TRUST_PROXY` | `true` — believe `X-Forwarded-*` from the proxy |
 | `SESSION_COOKIE_SECURE` | `false` — set `true` for a TLS-only deployment |
-| `EMBED_URL` | `http://192.168.0.100:8090` |
+| `EMBED_URL` | `OWUI_URL` — embeddings come from Open WebUI |
+| `EMBED_MODEL` | *(none)* — no model field is sent, so the endpoint picks |
+| `EMBED_PATH` | `/api/v1/embeddings` — set `/v1/embeddings` for a standalone server |
+| `EMBED_API_KEY` | `OWUI_API_KEY` — same endpoint, same key |
 | `REPOS_PATH` | `/repos` |
 | `RESIDUALITY_PORT` | `5010` |
 | `RESIDUALITY_USERNAME` / `RESIDUALITY_PASSWORD` | `admin` / `changeme` |
@@ -182,8 +185,10 @@ Required env (defaults in parentheses):
 **Change the defaults before exposing this to a network.** There is no rate limiting
 and the default credentials are committed in `docker-compose.yml`.
 
-The three model variables above are *defaults*. Anything set in the homepage settings
-panel is written to `residuality_models.cfg` and takes precedence over the environment —
+The model variables above are *defaults*, and so are `EMBED_URL`, `EMBED_MODEL` and
+`EMBED_PATH`.
+Anything set in the homepage settings panel is written to `residuality_models.cfg` and
+takes precedence over the environment —
 see [Model settings](#model-settings).
 
 ---
@@ -326,8 +331,22 @@ fenced reply there would reach history, past the point a diff can undo.
 
 The settings page (`/settings`) covers: the shared **default** model, separate **chat** and
 **edit** overrides, the endpoint URL, the API key, the prompt and system prompt used for
-edits, the model's **context window**, and how much of a range one edit may send. Precedence is per-call model → slot override → default → environment, and an
+edits, the model's **context window**, how much of a range one edit may send, and — under
+**Embedding model** / **Embedding endpoint** / **Embedding path** — what memory and
+snapshots embed with.
+Precedence is per-call model → slot override → default → environment, and an
 empty override means *follow the default* rather than *unset*.
+
+**Embedding model** deserves a note, because blank is not the harmless default it looks
+like. Blank sends no `model` field and leaves the choice to the endpoint, which is right
+for an install with exactly one registered embedding model and a bare `500 Internal
+Server Error` on one that has no default embedding model configured. Name the model the
+embeddings should use (the dropdown lists them; `/api/models` does not filter them out).
+The endpoint and path fields are for pointing embeddings somewhere other than Open
+WebUI — a standalone llama.cpp server, say, which serves `/v1/embeddings` rather than Open
+WebUI's `/api/v1/embeddings`, so the path has to say so. Neither is a `.env`-only knob: a
+change takes effect on save, with no restart. The line under the path field reports what is
+in force right now, model and full URL, so neither can be a guess.
 
 Settings are saved to `residuality_models.cfg`, beside the projects and inside the
 `/repos` mount so they survive a container recreate, and they layer *over* the
@@ -408,6 +427,24 @@ Two sharp edges worth keeping in mind when adding anything here:
   `<file>::<fn>`, an HTML section is `<file>::<tag>#<id>` (`templates/base.html::div#input-area`),
   a prose section is `<file>::<section-id>`. This doubles as the Qdrant payload key
   (`uuid5` over `node-<id>`).
+- **Embedding settings are settings because both failure modes are invisible from
+  the UI.** A manual snapshot used to fail with "embedding service unreachable",
+  and the service was up: the request named no model, and an Open WebUI with no
+  *default* embedding model answers a model-less `/api/v1/embeddings` with a bare
+  `500` whose body says nothing about why. The comment the old code carried —
+  "OWUI routes the request to whichever embedding model is registered" — was only
+  ever true of an install with exactly one, which is what it was written on.
+  Behind that sat a second one: `VECTOR_DIM = 768` was nomic-embed-text's width,
+  and Qwen3-Embedding-0.6B is 1024, so fixing the request just moved the failure
+  to Qdrant — a collection created at the wrong width rejects every write. Both
+  are settings now, and the width is neither: `_ensure_collection` is passed the
+  length of the vector it is about to store and creates the collection at that
+  size, and refuses an existing collection of a different width with the fix in
+  the message (its vectors came from another model and cannot be reused).
+  `owui_client.py` owns all of it — endpoint, path, model, key and the request —
+  so the indexer and the snapshot store cannot disagree about what an embedding
+  is, and `embed()` returns the reason on failure via `embed_last_error()`
+  rather than a bare `None`.
 - **Two project types, two snapshot shapes.** `snapshot.detect_project_type` picks
   `fiction` (reader knows / open threads / tone / last hook) versus `code`
   (current task / key decisions / what's working / what's broken). The same search
@@ -479,8 +516,11 @@ Two sharp edges worth keeping in mind when adding anything here:
 ### Known limitations
 
 - `merge` recomputes `repo.diff(a, b)` once **per file** instead of once per merge.
-- `indexer.py` and `snapshot.py` each carry their own `_embed`, `_ensure_collection`
-  and upsert/search helpers. Identical code, different names.
+- `indexer.py` and `snapshot.py` each carry their own `_ensure_collection` and
+  upsert/search helpers. Identical code, different names. (`_embed` *was* the
+  third member of that list; it is now the shared `embed()` in `owui_client.py`,
+  because two copies of it is two places to get the request wrong — see the
+  design note on embedding settings.)
 - `apply_edits` trusts `line_start`/`line_end` without bounds checks.
 - *Build Graph* skips files over 500 KB, so a minified vendor bundle (a 2.4 MB
   `babel.min.js`) never gets a section — the directory view still lists it, since

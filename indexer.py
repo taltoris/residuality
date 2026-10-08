@@ -18,13 +18,19 @@ import logging
 import requests
 from typing import Optional
 
+import owui_client
+
 logger = logging.getLogger(__name__)
 
 # Configuration
 QDRANT_URL        = os.getenv("QDRANT_URL",  "http://192.168.0.100:6333")
-EMBED_URL         = os.getenv("EMBED_URL",   "http://192.168.0.100:8090")
 COLLECTION_PREFIX = os.getenv("QDRANT_COLLECTION_PREFIX", "res")
-VECTOR_DIM        = 768
+
+# Note on the embeddings: the endpoint, the model and the request shape live in
+# owui_client.py, shared with snapshot.py. This module used to carry its own
+# `_embed` — and with it a hardcoded VECTOR_DIM, which is how a collection ends
+# up created at a width the model does not produce. The width is now read off
+# the vector that comes back and passed to `_ensure_collection`.
 
 
 # ---------------------------------------------------------------------------
@@ -45,55 +51,67 @@ def graph_collection(project_id: str) -> str:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _embed(text: str) -> Optional[list]:
+def _ensure_collection(name: str, dim: int) -> bool:
     """
-    Generate a dense embedding vector for the given text.
+    Ensure the named Qdrant collection exists at `dim` dimensions.
 
-    Truncates input to 2048 characters before sending to the embedding service.
-    Returns None on failure (network error, bad response, etc.).
-    """
-    try:
-        r = requests.post(
-            f"{EMBED_URL}/api/embeddings",
-            json={"input": text[:2048], "model": "nomic-embed-text"},
-            headers={"Content-Type": "application/json"},
-            timeout=15,
-        )
-        return r.json()["data"][0]["embedding"]
-    except Exception as e:
-        logger.warning(f"Embed failed: {e}")
-        return None
+    The width is a parameter rather than a constant because it is a property of
+    the embedding model, not of this file. That constant is exactly how the
+    installer ended up with 768-wide collections (nomic-embed-text's width) and
+    then handed them 1024-wide vectors (Qwen3-Embedding-0.6B's) — a mismatch
+    that rejects every write with an error nowhere near the cause.
 
+    An existing collection of a different width is refused, not written to:
+    those vectors came from another model, so they cannot be compared against
+    the new ones, and they cannot be re-widened in place. Deleting the
+    collection is the fix, and the log says so.
 
-def _ensure_collection(name: str) -> None:
-    """
-    Ensure the named Qdrant collection exists, creating it if necessary.
-
-    Uses a Cosine distance metric with dense vectors of size VECTOR_DIM.
-    Failures are logged but not raised.
+    Uses a Cosine distance metric. Returns False (having said why) rather than
+    raising, so a caller's point-write fails once and cleanly.
     """
     try:
         r = requests.get(f"{QDRANT_URL}/collections/{name}", timeout=10)
         if r.status_code == 404:
             requests.put(
                 f"{QDRANT_URL}/collections/{name}",
-                json={"vectors": {"dense": {"size": VECTOR_DIM, "distance": "Cosine"}}},
+                json={"vectors": {"dense": {"size": dim, "distance": "Cosine"}}},
                 headers={"Content-Type": "application/json"},
                 timeout=15,
             )
-            logger.info(f"Created collection: {name}")
+            logger.info(f"Created collection: {name} ({dim} dimensions)")
+            return True
+        if r.status_code != 200:
+            logger.warning(f"Collection check for {name} returned {r.status_code}")
+            return False
+
+        vectors = (r.json().get("result", {}).get("config", {})
+                   .get("params", {}).get("vectors", {}))
+        existing = (vectors.get("dense") or {}).get("size")
+        if existing and existing != dim:
+            logger.error(
+                f"Collection {name} is {existing}-dimensional but the embedding "
+                f"model returns {dim}. Delete the collection to rebuild it at "
+                f"{dim} — its vectors came from a different model and cannot be "
+                f"reused."
+            )
+            return False
+        return True
     except Exception as e:
         logger.warning(f"Collection check failed for {name}: {e}")
+        return False
 
 
-def _qdrant_put(collection: str, points: list) -> bool:
+def _qdrant_put(collection: str, points: list, dim: int) -> bool:
     """
     Upsert one or more points into the specified collection.
 
-    Ensures the collection exists before writing.
+    Ensures the collection exists at `dim` dimensions before writing, so a
+    width mismatch stops the write here with a message that names it rather
+    than surfacing later as a failed point.
     Returns True on HTTP 200, False otherwise.
     """
-    _ensure_collection(collection)
+    if not _ensure_collection(collection, dim):
+        return False
     try:
         r = requests.put(
             f"{QDRANT_URL}/collections/{collection}/points",
@@ -166,8 +184,10 @@ def index_commit(commit_data: dict) -> bool:
     if not message:
         return False
 
-    vector = _embed(message)
+    vector = owui_client.embed(message)
     if not vector:
+        logger.warning(f"Commit {commit_data.get('commit_hash', '?')[:8]} not indexed: "
+                       f"{owui_client.embed_last_error()}")
         return False
 
     point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS,
@@ -188,7 +208,7 @@ def index_commit(commit_data: dict) -> bool:
             "model_used":    commit_data.get("model_used", ""),
             "is_merge":      commit_data.get("is_merge", False),
         }
-    }])
+    }], len(vector))
 
 
 def index_graph_node(node_data: dict) -> bool:
@@ -221,8 +241,10 @@ def index_graph_node(node_data: dict) -> bool:
     if not text:
         return False
 
-    vector = _embed(text)
+    vector = owui_client.embed(text)
     if not vector:
+        logger.warning(f"Graph node {node_data.get('id', '?')} not indexed: "
+                       f"{owui_client.embed_last_error()}")
         return False
 
     point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS,
@@ -242,7 +264,7 @@ def index_graph_node(node_data: dict) -> bool:
             "label":      node_data.get("label",      ""),
             "docstring":  node_data.get("docstring",  ""),
         }
-    }])
+    }], len(vector))
 
 
 def search_commits(query: str, project_id: str = "default",
@@ -258,8 +280,9 @@ def search_commits(query: str, project_id: str = "default",
     Returns:
         List of dictionaries with commit metadata and similarity score.
     """
-    vector = _embed(query)
+    vector = owui_client.embed(query)
     if not vector:
+        logger.warning(f"Commit search unavailable: {owui_client.embed_last_error()}")
         return []
     results = _qdrant_search(commits_collection(project_id), vector, limit)
     return [
@@ -291,8 +314,9 @@ def search_graph_nodes(query: str, project_id: str = "default",
     Returns:
         List of dictionaries with node metadata and similarity score.
     """
-    vector = _embed(query)
+    vector = owui_client.embed(query)
     if not vector:
+        logger.warning(f"Graph search unavailable: {owui_client.embed_last_error()}")
         return []
     results = _qdrant_search(graph_collection(project_id), vector, limit)
     return [
