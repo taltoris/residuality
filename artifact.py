@@ -363,6 +363,17 @@ class ArtifactRepo:
         else:
             return (self.repo_path / path).read_text(encoding="utf-8", errors="replace")
 
+    def read_bytes(self, path: str) -> bytes:
+        """Read a file's raw bytes from the working tree.
+
+        For binary files (images, fonts, ...) that ``read`` would mangle by
+        forcing them through UTF-8. Raises FileNotFoundError if absent.
+        """
+        full = self.repo_path / path
+        if not full.is_file():
+            raise FileNotFoundError(f"{path} not found")
+        return full.read_bytes()
+
     def write(self, path: str, content: str, message: str,
               branch: Optional[str] = None,
               model_used: Optional[str] = None,

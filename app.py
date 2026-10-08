@@ -1733,14 +1733,195 @@ def graph_file_content(project_id: str, filepath: str):
         return jsonify({"error": str(e)}), 404
 
 
-@app.route("/projects/<project_id>/graph/explorer")
-@login_required
-def graph_explorer(project_id: str):
-    """Serve the React graph explorer page."""
-    repo = get_repo(project_id)
-    return render_template("graph_explorer.html", project_id=project_id)
+# ── Image display & replacement ───────────────────────────────────────────
+#
+# The node modal reads files through repo.read(), which forces everything
+# through UTF-8 — fine for code and prose, but it turns a PNG into garbage
+# text. Images need their raw bytes served back so the browser can render
+# them, plus a way to swap in a replacement without touching the line-based
+# edit path (which is meaningless for binary data).
 
-    
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+IMAGE_MIME = {
+    ".png":  "image/png",
+    ".jpg":  "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+    ".bmp":  "image/bmp",
+    ".svg":  "image/svg+xml",
+}
+IMAGE_SIZE_CAP = 15 * 1024 * 1024   # 15 MB — bigger than any reasonable asset
+
+
+def _is_image_path(filepath: str) -> bool:
+    return Path(filepath).suffix.lower() in IMAGE_EXTENSIONS
+
+
+@app.route("/projects/<project_id>/graph/image/<path:filepath>")
+@login_required
+def graph_image(project_id: str, filepath: str):
+    """Serve a tracked image file's raw bytes for inline display.
+
+    The node modal points an <img> at this URL when the clicked file has an
+    image extension. Returns the file with its detected MIME type so the
+    browser renders it; refuses non-image paths and anything over the cap.
+    """
+    if not _is_image_path(filepath):
+        return jsonify({"error": f"{filepath} is not an image"}), 400
+
+    repo = get_repo(project_id)
+    abs_path = repo.repo_path / filepath
+
+    # Resolve and confirm the path stays inside the repo root.
+    try:
+        abs_path.resolve().relative_to(repo.repo_path.resolve())
+    except ValueError:
+        return jsonify({"error": "path escapes the repository"}), 400
+
+    if not abs_path.is_file():
+        return jsonify({"error": f"{filepath} not found"}), 404
+
+    size = abs_path.stat().st_size
+    if size > IMAGE_SIZE_CAP:
+        return jsonify({"error": f"file is {size // 1024 // 1024} MB, over the {IMAGE_SIZE_CAP // 1024 // 1024} MB cap"}), 413
+
+    mime = IMAGE_MIME.get(Path(filepath).suffix.lower(), "application/octet-stream")
+    return send_file(str(abs_path), mimetype=mime, as_attachment=False)
+
+
+@app.route("/projects/<project_id>/graph/image/replace", methods=["POST"])
+@login_required
+def graph_image_replace(project_id: str):
+    """Replace a tracked image file with an uploaded one.
+
+    Multipart form: `file` (the new image) + `target` (repo-relative path of
+    the existing image to overwrite). Writes the bytes to the working tree
+    and leaves the file dirty for Regenerate & Commit — consistent with the
+    text-edit flow, which also does not commit on save.
+    """
+    target = request.form.get("target", "").strip()
+    upload = request.files.get("file")
+
+    if not target or not upload or not upload.filename:
+        return jsonify({"error": "missing 'target' or 'file' field"}), 400
+
+    if not _is_image_path(target):
+        return jsonify({"error": f"{target} is not an image path"}), 400
+
+    # Validate the uploaded file is actually an image by extension.
+    up_ext = Path(upload.filename).suffix.lower()
+    if up_ext not in IMAGE_EXTENSIONS:
+        return jsonify({"error": f"uploaded file must be an image ({', '.join(sorted(IMAGE_EXTENSIONS))})"}), 400
+
+    data = upload.read()
+    if len(data) > IMAGE_SIZE_CAP:
+        return jsonify({"error": f"upload is {len(data) // 1024 // 1024} MB, over the {IMAGE_SIZE_CAP // 1024 // 1024} MB cap"}), 413
+
+    repo = get_repo(project_id)
+    abs_path = repo.repo_path / target
+
+    # Guard against path traversal.
+    try:
+        abs_path.resolve().relative_to(repo.repo_path.resolve())
+    except ValueError:
+        return jsonify({"error": "target path escapes the repository"}), 400
+
+    # The target must already exist in the repo (we are replacing, not adding).
+    if not abs_path.is_file():
+        return jsonify({"error": f"{target} does not exist in the repository"}), 404
+
+    # Write the new bytes. Binary-safe: no encoding, no newline translation.
+    abs_path.write_bytes(data)
+
+    # Re-run the graph update for this file. For images this is a no-op (no
+    # parser handles .png etc.), but keeping the call uniform means the
+    # summary and graph.dot stay in sync if a parser is ever added.
+    try:
+        repo._update_graph(target)
+    except Exception:
+        pass   # graph rebuild is best-effort here; the image itself is saved
+
+    return jsonify({
+        "status":  "ok",
+        "file":    target,
+        "size":    len(data),
+        "message": f"replaced {target} ({len(data) // 1024} KB) — uncommitted, commit from Regenerate & Commit",
+    })
+
+
+# ── Snapshots ─────────────────────────────────────────────────────────────
+
+@app.route("/projects/<project_id>/snapshot/generate", methods=["POST"])
+@login_required
+def generate_snapshot_now(project_id: str):
+    """Generate and store an episodic snapshot on demand.
+
+    The commit pipeline (`index_commit_async`) already snapshots after every
+    commit, but a project that has not committed since being indexed has no
+    baseline at all — the Plan assessment then reads as *not yet* rather than
+    describing where things stand. This button is the manual trigger: it takes
+    the current HEAD (or the newest commit if the tree is dirty), asks the
+    summarizer model for a state-of-affairs snapshot, and stores it in Qdrant.
+
+    It runs in a background thread and answers immediately, because the model
+    call and the embedding request can each take many seconds — and either of
+    them may be down. A dead OWUI or embed endpoint must not hang the click:
+    the thread logs the failure and the status line reports it.
+    """
+    repo = get_repo(project_id)
+
+    def _generate():
+        try:
+            head   = repo.repo.heads[repo._current_branch()].commit
+            commit_hash    = head.hexsha
+            commit_message = head.message.strip().splitlines()[0] if head.message else "(no message)"
+            project_type   = detect_project_type(repo.repo_path)
+            snapshot       = generate_snapshot(
+                project_id       = project_id,
+                commit_hash      = commit_hash,
+                commit_message   = commit_message,
+                summary          = None,
+                project_type     = project_type,
+                owui_client      = owui,
+                summarizer_model = owui.SUMMARIZER_MODEL,
+            )
+            if not snapshot:
+                logger.warning(f"Snapshot generation returned nothing for {project_id}")
+                return
+            stored = store_snapshot(
+                project_id     = project_id,
+                commit_hash    = commit_hash,
+                commit_message = commit_message,
+                snapshot       = snapshot,
+                turn           = 0,
+                timestamp      = head.committed_date,
+            )
+            if stored:
+                logger.info(f"Manual snapshot stored for {project_id} @ {commit_hash[:8]}: "
+                            f"{snapshot.get('state', '')[:80]}")
+        except Exception as e:
+            logger.warning(f"Manual snapshot failed for {project_id}: {e}")
+
+    threading.Thread(target=_generate, daemon=True).start()
+    return jsonify({"status": "started",
+                    "message": "snapshot generation started — check the status line"})
+
+
+@app.route("/projects/<project_id>/snapshot/status")
+@login_required
+def snapshot_status(project_id: str):
+    """The latest stored snapshot for this project, or none.
+
+    The generate button polls this while it works: `latest_snapshot` scrolls
+    the stored payloads by timestamp, so a freshly generated snapshot shows up
+    here the moment it lands in Qdrant.
+    """
+    snap = latest_snapshot(project_id)
+    if not snap:
+        return jsonify({"has_snapshot": False, "snapshot": None})
+    return jsonify({"has_snapshot": True, "snapshot": snap})
+
+
 # ── API endpoints ─────────────────────────────────────────────────────────
 
 @app.route("/api/projects")

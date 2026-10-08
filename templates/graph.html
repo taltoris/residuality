@@ -94,6 +94,17 @@
 .large-file { color:#8b949e; text-decoration:line-through; }
 .ignore-tag { display:inline-flex; align-items:center; gap:0.3rem; background:#21262d; border:1px solid #30363d; border-radius:12px; padding:0.15rem 0.5rem; font-size:0.78rem; color:#8b949e; font-family:monospace; }
 .ignore-tag button { background:none; border:none; color:#f85149; cursor:pointer; font-size:0.8rem; padding:0; line-height:1; }
+/* Image display in the node modal: a centred <img> on a neutral backdrop,
+   capped so a 4K screenshot doesn't blow past the modal's max-height. */
+#node-modal .image-pane { display:flex; align-items:center; justify-content:center; min-height:200px; padding:12px; }
+#node-modal .image-pane img { max-width:100%; max-height:62vh; object-fit:contain; border-radius:4px; box-shadow:0 2px 12px rgba(0,0,0,0.4); }
+#node-modal .image-meta { text-align:center; font-size:11px; color:#8b949e; margin-top:8px; font-family:monospace; }
+/* Replace-image popover: hangs off the header like the AI popover. */
+#node-modal .replace-pop { display:none; position:absolute; top:46px; right:14px; z-index:6; width:min(340px,86%); background:#161b22; border:0.5px solid #30363d; border-radius:10px; padding:10px; box-shadow:0 10px 30px rgba(0,0,0,0.55); }
+#node-modal .replace-pop .rp-lab { font-size:10px; text-transform:uppercase; letter-spacing:0.04em; color:#8b949e; margin-bottom:4px; }
+#node-modal .replace-pop input[type=file] { font-size:12px; margin-bottom:6px; }
+#node-modal .replace-pop .rp-row { display:flex; align-items:center; gap:6px; margin-top:8px; }
+#node-modal .replace-pop .rp-status { flex:1; min-width:0; font-size:11px; line-height:1.3; color:#8b949e; }
 </style>
 {% endblock %}
 
@@ -102,7 +113,7 @@
     <h1>Project Control — {{ project_id }}</h1>
     <div style="display:flex;gap:0.5rem;">
         <button class="btn" id="build-all-btn">&#9881; Build Graph</button>
-        <a href="/projects/{{ project_id }}/graph/explorer" class="btn">&#x1F50D; Explorer</a>
+        <button class="btn" id="snapshot-btn" title="Generate an episodic snapshot of the current state (uses the summarizer model)">&#128274; Snapshot</button>
         <button class="btn btn-primary" id="regen-btn">&#8635; Regenerate &amp; Commit</button>
     </div>
 </div>
@@ -184,6 +195,20 @@
     </div>
 </details>
 
+<details style="margin-bottom:1rem;" id="snapshot-panel">
+    <summary style="cursor:pointer;color:#8b949e;font-size:0.9rem;padding:0.5rem 0;">&#9654; snapshot memory</summary>
+    <div class="card" style="margin-top:0.5rem;">
+        <p style="font-size:0.82rem;color:#8b949e;margin-bottom:0.75rem;">
+            Episodic snapshots are what the Plan assessment reads to know where things stand.
+            They are generated automatically after each commit; use the button above to create
+            one now from the current HEAD. A dead OWUI or embedding endpoint will not hang the
+            click — it just reports back here.
+        </p>
+        <div id="snapshot-status" style="font-size:0.85rem;color:#8b949e;"></div>
+        <div id="snapshot-detail" style="display:none;margin-top:0.6rem;font-size:0.85rem;line-height:1.5;"></div>
+    </div>
+</details>
+
 <div id="file-panel" style="display:none;" class="card">
     <h2 style="margin-bottom:0.75rem;">Changed Files</h2>
     <div id="file-list"></div>
@@ -236,6 +261,7 @@
                 </label>
                 <button id="modal-ai" title="Ask a model to rewrite these lines">AI</button>
                 <button id="modal-edit" title="Edit these lines">Edit</button>
+                <button id="modal-replace" title="Upload a replacement image" style="display:none;">Replace</button>
                 <button id="modal-close" title="Close">&times;</button>
             </div>
         </header>
@@ -251,6 +277,15 @@
                 <span class="ai-hint" id="modal-ai-status"></span>
                 <button class="btn" id="modal-ai-cancel">Cancel</button>
                 <button class="btn btn-primary" id="modal-ai-go">Ask</button>
+            </div>
+        </div>
+        <div class="replace-pop" id="modal-replace-pop">
+            <div class="rp-lab">Replace image</div>
+            <input type="file" id="modal-replace-file" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml">
+            <div class="rp-row">
+                <span class="rp-status" id="modal-replace-status"></span>
+                <button class="btn" id="modal-replace-cancel">Cancel</button>
+                <button class="btn btn-primary" id="modal-replace-go">Upload</button>
             </div>
         </div>
         <div class="body">
@@ -289,6 +324,16 @@
         el.style.display = 'block';
         el.style.color   = color || '#8b949e';
         el.textContent   = msg;
+    }
+
+    // A file whose extension is a known image type: the modal shows it as an
+    // <img> rather than forcing its bytes through UTF-8 into a <pre>.
+    var IMAGE_EXTS = {'.png':1,'.jpg':1,'.jpeg':1,'.gif':1,'.webp':1,'.bmp':1,'.svg':1};
+    function isImageFile(p) {
+        if (!p) return false;
+        var dot = p.lastIndexOf('.');
+        if (dot < 0) return false;
+        return !!IMAGE_EXTS[p.slice(dot).toLowerCase()];
     }
 
     // ── .gitignore ─────────────────────────────────────────────────────────
@@ -361,6 +406,104 @@
                 btn.textContent = 'Build Graph';
             });
     });
+
+    // ── Snapshot memory ───────────────────────────────────────────────────
+    // The button fires a background generation (the model + embedding calls
+    // can each take many seconds), so we answer immediately and poll the
+    // status endpoint until the new snapshot lands or we give up.
+    function renderSnapshotDetail(snap) {
+        var el = document.getElementById('snapshot-detail');
+        if (!snap) { el.style.display = 'none'; return; }
+        var lines = [];
+        lines.push('<div style="color:#58a6ff;font-family:monospace;">@ ' + esc((snap.commit_hash||'').slice(0,8)) + '</div>');
+        if (snap.state) lines.push('<div><b>State:</b> ' + esc(snap.state) + '</div>');
+        if (snap.current_task) lines.push('<div><b>Task:</b> ' + esc(snap.current_task) + '</div>');
+        if (snap.key_decisions && snap.key_decisions.length)
+            lines.push('<div><b>Decisions:</b> ' + esc(snap.key_decisions.join('; ')) + '</div>');
+        if (snap.open_questions && snap.open_questions.length)
+            lines.push('<div><b>Open:</b> ' + esc(snap.open_questions.join('; ')) + '</div>');
+        if (snap.working && snap.working.length)
+            lines.push('<div><b>Working:</b> ' + esc(snap.working.join('; ')) + '</div>');
+        if (snap.broken && snap.broken.length)
+            lines.push('<div style="color:#f85149;"><b>Broken:</b> ' + esc(snap.broken.join('; ')) + '</div>');
+        el.innerHTML = lines.join('');
+        el.style.display = 'block';
+    }
+    function loadSnapshotStatus() {
+        fetch('/projects/'+PID+'/snapshot/status')
+            .then(function(r){ return r.json(); })
+            .then(function(d) {
+                var st = document.getElementById('snapshot-status');
+                if (d.has_snapshot) {
+                    st.textContent = 'Latest snapshot present.';
+                    st.style.color = '#3fb950';
+                    renderSnapshotDetail(d.snapshot);
+                } else {
+                    st.textContent = 'No snapshot stored yet for this project.';
+                    st.style.color = '#8b949e';
+                    renderSnapshotDetail(null);
+                }
+            })
+            .catch(function(e){
+                var st = document.getElementById('snapshot-status');
+                st.textContent = 'Could not read snapshot status: ' + e;
+                st.style.color = '#f85149';
+            });
+    }
+    function generateSnapshot() {
+        var btn    = document.getElementById('snapshot-btn');
+        var status = document.getElementById('snapshot-status');
+        btn.disabled    = true;
+        btn.textContent = 'Generating...';
+        status.style.color = '#8b949e';
+        status.textContent = 'Asking the summarizer model for a state-of-affairs snapshot...';
+
+        fetch('/projects/'+PID+'/snapshot/generate', {method:'POST'})
+            .then(function(r){ return r.json(); })
+            .then(function(d) {
+                if (d.error) {
+                    status.textContent = 'Failed to start: ' + d.error;
+                    status.style.color = '#f85149';
+                    btn.disabled    = false;
+                    btn.textContent = '📴 Snapshot';
+                    return;
+                }
+                // Poll for the result. A dead OWUI/embed endpoint means the
+                // thread just logs and nothing lands, so cap the wait rather
+                // than spin forever.
+                var tries = 0;
+                var timer = setInterval(function() {
+                    tries++;
+                    fetch('/projects/'+PID+'/snapshot/status')
+                        .then(function(r){ return r.json(); })
+                        .then(function(sd) {
+                            if (sd.has_snapshot) {
+                                clearInterval(timer);
+                                btn.disabled    = false;
+                                btn.textContent = '📴 Snapshot';
+                                status.textContent = 'Snapshot generated.';
+                                status.style.color = '#3fb950';
+                                renderSnapshotDetail(sd.snapshot);
+                            } else if (tries > 30) {   // ~30s: give up politely
+                                clearInterval(timer);
+                                btn.disabled    = false;
+                                btn.textContent = '📴 Snapshot';
+                                status.textContent = 'Still no snapshot — the model or embedding service may be down. Check the server log.';
+                                status.style.color = '#d29922';
+                            }
+                        })
+                        .catch(function(){ /* keep polling */ });
+                }, 1000);
+            })
+            .catch(function(e) {
+                status.textContent = 'Request failed: ' + e;
+                status.style.color = '#f85149';
+                btn.disabled    = false;
+                btn.textContent = '📴 Snapshot';
+            });
+    }
+    document.getElementById('snapshot-btn').addEventListener('click', generateSnapshot);
+    loadSnapshotStatus();
 
     // ── Regenerate & Commit ────────────────────────────────────────────────
     document.getElementById('regen-btn').addEventListener('click', function() {
@@ -820,10 +963,18 @@
         document.getElementById('modal-source').innerHTML = '<div class="empty">Loading...</div>';
         modalState = { file: filepath, nodes: [], pane: NODE_PANE };
         sourceState = { file: null, nodeId: null, lineStart: 1, lineEnd: 0,
-                        content: '', ready: false };
+                        content: '', ready: false, isImage: false };
         setEditStatus('');
         updateEditChrome();
         modalNonce++;
+        // An image has no interior nodes and no text to read: render it
+        // directly and skip the node-list fetch entirely.
+        if (isImageFile(filepath)) {
+            document.getElementById('modal-nodes').innerHTML =
+                '<div class="empty">Image - no interior nodes.</div>';
+            showImage(filepath);
+            return;
+        }
         var n = modalNonce;
         document.getElementById('modal-nodes').innerHTML =
             '<div class="empty">Loading nodes...</div>';
@@ -935,11 +1086,14 @@
     // and the checkbox is a way to *look* at an edit, not a way into editing:
     // it exists in edit mode and nowhere else.
     function updateEditChrome() {
-        document.getElementById('modal-edit').disabled = !sourceState.ready || !!editState;
-        // The AI button produces the text edit mode holds, so it only means
-        // something with a range on screen and no edit already open.
-        document.getElementById('modal-ai').disabled = !aiAvailable();
+        var isImg = !!sourceState.isImage;
+        // Images are not line-addressable: Edit and AI have nothing to act on.
+        document.getElementById('modal-edit').disabled = isImg || !sourceState.ready || !!editState;
+        document.getElementById('modal-ai').disabled   = isImg || !aiAvailable();
         if (!aiAvailable()) closeAiPopover();
+        if (isImg) closeReplacePopover();
+        // The Replace button is the one image-specific control in the header.
+        document.getElementById('modal-replace').style.display = isImg ? 'inline-block' : 'none';
         document.getElementById('modal-showchanges-wrap').style.display =
             editState ? 'inline-flex' : 'none';
         ['modal-save', 'modal-cancel'].forEach(function(id) {
@@ -996,6 +1150,7 @@
 
     function showFullFile(filepath) {
         if (!leaveEditGuard()) return;
+        if (isImageFile(filepath)) { showImage(filepath); return; }
         var pane = sourcePane();
         setModalContext(filepath, '(whole file)');
         modalState.pane = SOURCE_PANE;
@@ -1009,6 +1164,98 @@
                 renderSource(text, filepath, null, 1, lineCount(text));
             })
             .catch(function(e) { renderSourceError(e.message); });
+    }
+
+    // ── Image display & replacement ───────────────────────
+    // An image file renders as an <img> pointed at the raw-bytes route, not
+    // as UTF-8 text. The line-based Edit/AI chrome is meaningless for binary
+    // data, so it is hidden; only Replace (and whole-file / expand / close)
+    // stay live. Replacing writes the new bytes to the working tree and leaves
+    // the file dirty for Regenerate & Commit, like a text edit does.
+    var _imgCacheBust = 0;
+
+    function showImage(filepath) {
+        if (!leaveEditGuard()) return;
+        setModalContext(filepath, '(image)');
+        modalState.pane = SOURCE_PANE;
+        sourceState = { file: filepath, nodeId: null, lineStart: 1, lineEnd: 0,
+                        content: '', ready: true, isImage: true };
+        var pane = sourcePane();
+        pane.innerHTML = '';
+        var wrap = document.createElement('div');
+        wrap.className = 'image-pane';
+        var img = document.createElement('img');
+        img.alt = filepath;
+        // Cache-bust so a just-replaced image re-fetches fresh bytes.
+        img.src = '/projects/' + PID + '/graph/image/' +
+                  encodeURIComponent(filepath) + '?v=' + (++_imgCacheBust);
+        img.onerror = function() {
+            wrap.innerHTML = '<div class="empty">Could not load image: ' +
+                             esc(filepath) + '</div>';
+        };
+        wrap.appendChild(img);
+        var meta = document.createElement('div');
+        meta.className = 'image-meta';
+        meta.textContent = filepath;
+        pane.appendChild(wrap);
+        pane.appendChild(meta);
+        updateEditChrome();
+    }
+
+    // ── Replace-image popover ─────────────────────────────
+    function replacePopover() { return document.getElementById('modal-replace-pop'); }
+
+    function replaceAvailable() { return !!sourceState.isImage && !editState; }
+
+    function closeReplacePopover() { replacePopover().style.display = 'none'; }
+
+    function setReplaceStatus(msg, color) {
+        var el = document.getElementById('modal-replace-status');
+        el.textContent = msg || '';
+        el.style.color = color || '#8b949e';
+    }
+
+    function openReplacePopover() {
+        if (!replaceAvailable()) return;
+        replacePopover().style.display = 'block';
+        document.getElementById('modal-replace-file').focus();
+    }
+
+    function uploadReplacement() {
+        if (!replaceAvailable()) return;
+        var fileInput = document.getElementById('modal-replace-file');
+        var goBtn     = document.getElementById('modal-replace-go');
+        if (!fileInput.files.length) {
+            setReplaceStatus('pick a file first', '#d29922');
+            fileInput.focus();
+            return;
+        }
+        var target = sourceState.file;
+        goBtn.disabled = true;
+        setReplaceStatus('uploading…', '#8b949e');
+        var fd = new FormData();
+        fd.append('target', target);
+        fd.append('file',   fileInput.files[0]);
+
+        fetch('/projects/' + PID + '/graph/image/replace', { method: 'POST', body: fd })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+            .then(function(res) {
+                goBtn.disabled = false;
+                var d = res.d || {};
+                if (!res.ok || d.error) {
+                    setReplaceStatus(d.error || 'the request failed', '#f85149');
+                    return;
+                }
+                fileInput.value = '';
+                closeReplacePopover();
+                // Re-render the pane so the <img> picks up the new bytes.
+                showImage(target);
+                setEditStatus(d.message || ('replaced ' + target), '#3fb950');
+            })
+            .catch(function(e) {
+                goBtn.disabled = false;
+                setReplaceStatus('request failed: ' + e, '#f85149');
+            });
     }
 
     // ── Editing ─────────────────────────────────────────
@@ -1377,11 +1624,13 @@
     function closeNodeModal() {
         if (!leaveEditGuard()) return;
         closeAiPopover();
+        closeReplacePopover();
         document.getElementById('modal-ai-prompt').value = '';   // blank next time
+        document.getElementById('modal-replace-file').value = '';
         document.getElementById('node-modal').style.display = 'none';
         modalState  = { file: null, nodes: [], pane: NODE_PANE };
         sourceState = { file: null, nodeId: null, lineStart: 1, lineEnd: 0,
-                        content: '', ready: false };
+                        content: '', ready: false, isImage: false };
         setModalContext('', '');
         setEditStatus('');
         updateEditChrome();
@@ -1417,6 +1666,14 @@
     document.getElementById('modal-showchanges').addEventListener('change', renderDiff);
 
     // ── AI popover wiring ──────────────────────────────────
+    // Replace-image popover wiring.
+    document.getElementById('modal-replace').addEventListener('click', function() {
+        if (replacePopover().style.display === 'block') closeReplacePopover();
+        else                                            openReplacePopover();
+    });
+    document.getElementById('modal-replace-go').addEventListener('click', uploadReplacement);
+    document.getElementById('modal-replace-cancel').addEventListener('click', closeReplacePopover);
+
     document.getElementById('modal-ai').addEventListener('click', function() {
         if (aiPopover().style.display === 'block') closeAiPopover();
         else                                       openAiPopover();
