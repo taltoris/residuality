@@ -264,7 +264,7 @@ def index_commit_async(repo: ArtifactRepo, commit_hash: str,
                 summary          = summary,
                 project_type     = project_type,
                 owui_client      = owui,
-                summarizer_model = owui.SUMMARIZER_MODEL,
+                summarizer_model = resolve_model(model_cfg, "default"),
             )
             if snapshot:
                 store_snapshot(
@@ -1861,7 +1861,7 @@ def generate_snapshot_now(project_id: str):
     baseline at all — the Plan assessment then reads as *not yet* rather than
     describing where things stand. This button is the manual trigger: it takes
     the current HEAD (or the newest commit if the tree is dirty), asks the
-    summarizer model for a state-of-affairs snapshot, and stores it in Qdrant.
+    default model for a state-of-affairs snapshot, and stores it in Qdrant.
 
     It runs in a background thread and answers immediately, because the model
     call and the embedding request can each take many seconds — and either of
@@ -1883,7 +1883,7 @@ def generate_snapshot_now(project_id: str):
                 summary          = None,
                 project_type     = project_type,
                 owui_client      = owui,
-                summarizer_model = owui.SUMMARIZER_MODEL,
+                summarizer_model = resolve_model(model_cfg, "default"),
             )
             if not snapshot:
                 logger.warning(f"Snapshot generation returned nothing for {project_id}")

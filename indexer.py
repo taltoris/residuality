@@ -54,7 +54,7 @@ def _embed(text: str) -> Optional[list]:
     """
     try:
         r = requests.post(
-            f"{EMBED_URL}/v1/embeddings",
+            f"{EMBED_URL}/api/embeddings",
             json={"input": text[:2048], "model": "nomic-embed-text"},
             headers={"Content-Type": "application/json"},
             timeout=15,

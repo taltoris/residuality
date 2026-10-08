@@ -41,7 +41,7 @@ def _embed(text: str) -> Optional[list]:
         truncated_text = text[:2048]
 
         r = requests.post(
-            f"{EMBED_URL}/v1/embeddings",
+            f"{EMBED_URL}/api/embeddings",
             json={"input": truncated_text, "model": "nomic-embed-text"},
             headers={"Content-Type": "application/json"},
             timeout=15,  # Set timeout to prevent hanging on network issues.
