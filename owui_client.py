@@ -659,6 +659,7 @@ class OWUIClient:
         snapshot: Optional[str],
         graph_summary: Optional[str],
         recent_commits: Optional[list] = None,
+        recent_conversations: Optional[list] = None,   # ← new
         model: Optional[str] = None,
     ) -> dict:
         """Ask the planner model to assess project state and suggest next steps.
@@ -684,8 +685,16 @@ class OWUIClient:
                 for c in recent_commits[:5]
             ])
             context_parts.append(f"## Recent Commits\n{commit_lines}")
-    
+        if recent_conversations:
+            conv_lines = "\n".join([
+                f"- {c['title']} ({c['turns']} turns): {c['excerpt']}"
+                for c in recent_conversations
+            ])
+            context_parts.append(f"## Recent Plan Conversations\n{conv_lines}")
+
         missing = []
+        if not recent_conversations:
+            missing.append("no Plan conversations have been recorded yet")
         if not snapshot:
             missing.append("no snapshot has been indexed for this project yet")
         if not graph_summary:

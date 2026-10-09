@@ -637,6 +637,43 @@ def _chat_context_parts(repo: ArtifactRepo) -> list:
     return parts
 
 
+def _recent_conversation_summaries(repo: ArtifactRepo, limit: int = 4) -> list:
+    """Summarise the most recent Plan conversations for the assessment prompt.
+
+    Returns a list of dicts, newest first, each with:
+      title   – the conversation's title (or first user message, truncated)
+      turns   – how many exchanges it has
+      excerpt – the first user message, capped at 200 chars (topic signal)
+
+    Conversations with zero turns are skipped: they carry no signal.
+    """
+    chats_dir = _chats_dir(repo)
+    if not chats_dir.exists():
+        return []
+
+    chat_paths = sorted(chats_dir.glob("*.json"),
+                        key=lambda p: p.stat().st_mtime, reverse=True)
+
+    summaries = []
+    for p in chat_paths[:limit]:
+        try:
+            data = json.loads(p.read_text())
+            history = data.get("history", [])
+            if not history:
+                continue  # empty conversation, nothing to summarise
+            title = (data.get("title") or history[0]["user"][:60]).strip()
+            excerpt = history[0]["user"][:200]
+            summaries.append({
+                "title":   title,
+                "turns":   len(history),
+                "excerpt": excerpt,
+            })
+        except Exception:
+            continue  # unreadable JSON, skip silently
+
+    return summaries
+
+
 @app.route("/projects/<project_id>/plan")
 @login_required
 def plan(project_id: str):
@@ -778,6 +815,14 @@ def plan_assess(project_id: str):
     except Exception as e:
         logger.warning(f"Plan: graph summary failed for {project_id}: {e}")
 
+    recent_conversations = None
+    try:
+        convs = _recent_conversation_summaries(repo, limit=4)
+        if convs:
+            recent_conversations = convs
+    except Exception as e:
+        logger.warning(f"Plan: conversation summaries failed for {project_id}: {e}")
+
     try:
         # The commit key is normalised to the shape generate_plan formats: the
         # git log calls it `hash`, a commit record calls it `commit_hash`, and
@@ -794,6 +839,7 @@ def plan_assess(project_id: str):
             snapshot=snapshot,
             graph_summary=graph_summary,
             recent_commits=recent,
+            recent_conversations=recent_conversations,
             model=resolve_model(model_cfg, "planner"),
         )
     except Exception as e:
@@ -801,9 +847,10 @@ def plan_assess(project_id: str):
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 502
 
     plan["context"] = {
-        "snapshot":      bool(snapshot),
-        "graph_summary": bool(graph_summary),
-        "commits":       len(recent),
+        "snapshot":           bool(snapshot),
+        "graph_summary":      bool(graph_summary),
+        "commits":            len(recent),
+        "conversations":      len(recent_conversations or []),
     }
     return jsonify(plan)
 
