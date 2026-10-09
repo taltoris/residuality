@@ -421,8 +421,8 @@ Two sharp edges worth keeping in mind when adding anything here:
 
 - **Graph updates are section-replacement, not full rebuild.** Each file owns a
   `// --- file: <path> ---` … `// --- end: <path> ---` block. Rewriting one file's
-  block leaves every other project file untouched. The write is atomic (`write` to
-  `<file>.tmp`, then `rename()`).
+  block leaves every other project file untouched. Files that have been deleted are
+  pruned The write is atomic (`write` to `<file>.tmp`, then `rename()`).
 - **Node IDs are hierarchical:** `<file>::<Class>::<method>`. A top-level function is
   `<file>::<fn>`, an HTML section is `<file>::<tag>#<id>` (`templates/base.html::div#input-area`),
   a prose section is `<file>::<section-id>`. This doubles as the Qdrant payload key

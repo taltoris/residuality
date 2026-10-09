@@ -935,6 +935,7 @@ def build_graph_all(project_id: str):
     repo      = get_repo(project_id)
     errors    = []
     processed = []
+    walked    = set()
 
     gitignore_path = repo.repo_path / ".gitignore"
     if not gitignore_path.exists():
@@ -971,6 +972,7 @@ def build_graph_all(project_id: str):
         if size > size_limit:
             continue
 
+        walked.add(rel)
         logger.info(f"Processing: {rel}")
         try:
             repo._update_graph(rel)
@@ -979,6 +981,11 @@ def build_graph_all(project_id: str):
             error_msg = f"{rel}: {type(e).__name__}: {e}"
             logger.error(error_msg, exc_info=True)
             errors.append(error_msg)
+
+    try:
+        repo.prune_graph_sections(walked)
+    except Exception as e:
+        errors.append(f"prune: {type(e).__name__}: {e}")
 
     try:
         if gitignore_path.exists() and not _is_ignored(".gitignore"):
@@ -1186,6 +1193,11 @@ def regenerate_graph(project_id: str):
             repo._update_graph(filepath)
         except Exception as e:
             errors.append(f"{filepath}: {e}")
+
+    try:
+        repo.prune_graph_sections(set(all_files))
+    except Exception as e:
+        errors.append(f"prune: {e}")
 
     try:
         if repo.repo.is_dirty(index=True):

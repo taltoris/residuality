@@ -936,6 +936,51 @@ class ArtifactRepo:
         tmp.write_text(updated)
         tmp.rename(dot_path)
         logger.info(f"Updated graph.dot for {filepath}")
+    
+    def prune_graph_sections(self, keep_paths: set) -> int:
+        """Remove graph.dot sections for files not in keep_paths.
+
+        _write_dot_section only replaces or appends a section, so a file deleted
+        from the tree keeps its section forever. A full build (build_all /
+        regenerate) walks the tree and rewrites a section for every file it sees;
+        this drops any section whose file is not in keep_paths (the set that build
+        just walked), so the graph matches the tree. A file that is on disk but
+        failed to parse is still in keep_paths, so its stale section is kept
+        rather than deleted over a transient error. Returns the count removed.
+        """
+        dot_path = self.repo_path / ".residuality" / "graph.dot"
+        if not dot_path.exists():
+            return 0
+
+        lines = dot_path.read_text().splitlines(keepends=True)
+        start_re = re.compile(r'^\s*// --- file: (.+?) ---\s*$')
+
+        sections, cur = [], None
+        for i, line in enumerate(lines):
+            m = start_re.match(line)
+            if m:
+                cur = {"file": m.group(1), "start": i}
+            elif cur is not None and line.strip() == f"// --- end: {cur['file']} ---":
+                cur["end"] = i
+                sections.append(cur)
+                cur = None
+
+        to_remove = [s for s in sections if s["file"] not in keep_paths]
+        if not to_remove:
+            return 0
+
+        drop = set()
+        for s in to_remove:
+            j = s["end"] + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1                      # swallow the section's trailing blank line
+            drop.update(range(s["start"], j))
+
+        tmp = dot_path.with_suffix(".tmp")
+        tmp.write_text("".join(ln for i, ln in enumerate(lines) if i not in drop))
+        tmp.rename(dot_path)                 # atomic, same as _write_dot_section
+        self._refresh_summary()              # re-render the on-disk twin
+        return len(to_remove)
 
     def _update_prose_graph(self, filepath: str) -> None:
         """Parse rs:section markers and update graph.dot for a prose file."""
