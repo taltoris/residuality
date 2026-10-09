@@ -5,6 +5,7 @@ Handles init, read, write, branch, merge, checkout, diff, and optional remotes.
 """
 
 import os
+import time
 import logging
 import re
 from pathlib import Path
@@ -475,15 +476,17 @@ class ArtifactRepo:
 
     # ── History ───────────────────────────────────────────────────────────
 
-    def get_commits(self) -> list:
+    def get_commits(self, include_working: bool = False) -> list:
         """Return every commit on every branch, newest first.
 
         One plain record per commit for the History page and the Merge table;
         `parents`, `branches` and `is_merge` are what a reader needs to place a
-        commit without a drawn graph.
+        commit without a drawn graph. With `include_working`, a synthetic
+        `working` record is prepended when the tree has uncommitted changes, so
+        the running state sits at the top of History and can be diffed against
+        any commit.
         """
         commits = list(self.repo.iter_commits("--all"))
-        #this is a test comment
         nodes = []
         for c in commits:
             # Determine branch name(s)
@@ -503,17 +506,136 @@ class ArtifactRepo:
                 "author":    str(c.author),
                 "is_merge":  len(c.parents) > 1,
             })
+        if include_working:
+            work = self._working_entry()
+            if work:
+                nodes.insert(0, work)
         return nodes
 
+    def _working_entry(self) -> Optional[dict]:
+        """A pseudo-commit for the current working tree, or None if clean.
+
+        Counts modified/staged tracked files plus untracked ones; the message
+        lists them so the row is useful before anyone opens the diff.
+        """
+        try:
+            changed   = [d.a_path for d in self.repo.index.diff(None)]
+            staged    = [d.a_path for d in self.repo.index.diff("HEAD")]
+            untracked = [p for p in self.repo.untracked_files
+                         if not p.startswith(".residuality")]
+            paths = sorted(set(changed + staged + untracked))
+            if not paths:
+                return None
+            head  = self.repo.head.commit.hexsha[:8]
+            label = f"Uncommitted changes ({len(paths)} file{'' if len(paths)==1 else 's'})"
+            shown = ", ".join(paths[:6]) + (" …" if len(paths) > 6 else "")
+            return {
+                "hash":      "working",
+                "short":     "working",
+                "message":   f"{label}: {shown}",
+                "parents":   [head],
+                "branches":  [self._current_branch()],
+                "timestamp": int(time.time()),
+                "author":    "working tree",
+                "is_merge":  False,
+                "working":   True,
+            }
+        except Exception as e:
+            logger.warning(f"_working_entry failed: {e}")
+            return None
+
     def diff(self, commit_a: str, commit_b: str) -> str:
-        """Return unified diff between two commits."""
-        ca = self.repo.commit(commit_a)
-        cb = self.repo.commit(commit_b)
-        diff = ca.diff(cb, create_patch=True)
-        result = []
-        for d in diff:
-            result.append(d.diff.decode("utf-8", errors="replace"))
-        return "\n".join(result)
+        """Return unified diff between two commits.
+
+        Either side may be the literal ``working`` (or ``WORKING``), which means
+        the current working tree rather than a commit — that is what lets the
+        History page compare uncommitted changes against any commit. A pair of
+        two real commits keeps the old behaviour exactly.
+        """
+        a_is_work = commit_a.strip().lower() == "working"
+        b_is_work = commit_b.strip().lower() == "working"
+
+        if not (a_is_work or b_is_work):
+            ca = self.repo.commit(commit_a)
+            cb = self.repo.commit(commit_b)
+            diff = ca.diff(cb, create_patch=True)
+            return "\n".join(d.diff.decode("utf-8", errors="replace") for d in diff)
+
+        # Working-tree side. `git diff <commit>` (a single ref) means "that
+        # commit vs the working tree" and covers staged + unstaged tracked
+        # changes. Untracked files are not part of any commit, so git omits
+        # them here; we append them as synthetic all-addition patches below so
+        # new files show up in the comparison too.
+        # The real commit is whichever side is NOT the working tree.
+        base = commit_b if a_is_work else commit_a
+        try:
+            out = self.repo.git.diff("--no-color", "--unified=3", base)
+            text = out.decode("utf-8", errors="replace") if isinstance(out, bytes) else out
+        except Exception as e:
+            logger.warning(f"working-tree diff failed: {e}")
+            text = "(could not compute working-tree diff)"
+
+        extra = self._untracked_diff()
+        if extra:
+            text = (text + "\n" if text.strip() else "") + extra
+        # git orients the output from `base` toward the working tree, which is
+        # exactly "from the commit toward the current state" either way.
+        return text
+
+    def _untracked_diff(self) -> str:
+        """Synthetic unified-diff blocks for untracked files (all additions).
+
+        A new file has no prior version, so its whole content is added lines;
+        the header mirrors what `git diff` would emit for an empty-to-file
+        change. Skips the .residuality bookkeeping directory.
+        """
+        blocks = []
+        for path in sorted(self.repo.untracked_files):
+            if path.startswith(".residuality"):
+                continue
+            full = self.repo_path / path
+            if not full.is_file():
+                continue
+            try:
+                content = full.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue  # binary/unreadable — leave it out rather than mangle
+            lines = content.splitlines()
+            n = len(lines)
+            body = "".join("+" + ln + "\n" for ln in lines)
+            blocks.append(
+                f"diff --git a/{path} b/{path}\n"
+                f"new file mode 100644\n"
+                f"--- /dev/null\n"
+                f"+++ b/{path}\n"
+                f"@@ -0,0 +1,{n} @@\n"
+                + body
+            )
+        return "\n".join(blocks)
+
+    @staticmethod
+    def _reverse_diff(text: str) -> str:
+        """Swap +/- on a unified diff's body lines (headers stay put).
+
+        Available for callers that need the opposite orientation of a patch;
+        the working-tree path in `diff` does not need it because git already
+        orients the output toward the working tree.
+        """
+        out, in_hunk = [], False
+        for line in text.splitlines():
+            if line.startswith("@@"):
+                in_hunk = True
+                out.append(line)
+            elif line.startswith(("--- ", "+++ ", "diff ", "index ")):
+                in_hunk = False
+                out.append(line)
+            elif in_hunk and line.startswith("+"):
+                out.append("-" + line[1:])
+            elif in_hunk and line.startswith("-"):
+                out.append("+" + line[1:])
+            else:
+                out.append(line)
+        return "\n".join(out)
 
     def log(self, limit: int = 50) -> list:
         """Return recent commit history."""
@@ -1101,23 +1223,50 @@ class ArtifactRepo:
         self.repo.create_remote(name, url)
         logger.info(f"Remote '{name}' → {url}")
 
+    # ── Remote auth ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _remote_env() -> Optional[dict]:
+        """Env that lets git authenticate an HTTPS remote with GITHUB_TOKEN.
+
+        Git's only supported way to feed credentials non-interactively is a
+        GIT_ASKPASS *script* — it is run once per prompt and its stdout is the
+        answer. Pointing it at `echo` (the old approach) answers every prompt
+        with an empty string, so GitHub rejects the push; and GIT_USERNAME /
+        GIT_PASSWORD are not variables git reads at all. The script below
+        answers the username prompt with the literal `token` (GitHub accepts
+        any username when the password is a valid token) and the password
+        prompt with the token itself.
+        """
+        if not GITHUB_TOKEN:
+            return None
+        import tempfile
+        script = Path(tempfile.gettempdir()) / "residuality_askpass.sh"
+        script.write_text(
+            '#!/bin/sh\n'
+            'case "$1" in\n'
+            '  *[Uu]sername*) echo token ;;\n'
+            f'  *) printf "%s\\n" {GITHUB_TOKEN!r} ;;\n'
+            'esac\n'
+        )
+        os.chmod(script, 0o755)
+        return {
+            "GIT_ASKPASS": str(script),
+            "GIT_TERMINAL_PROMPT": "0",   # never hang waiting on a TTY
+        }
+
     def push(self, remote: str = "origin", branch: str = "main") -> None:
         """Push to remote. Uses GITHUB_TOKEN env var if set."""
         if remote not in [r.name for r in self.repo.remotes]:
             raise ValueError(f"No remote '{remote}' configured")
-        env = {}
-        if GITHUB_TOKEN:
-            env["GIT_ASKPASS"] = "echo"
-            env["GIT_USERNAME"] = "token"
-            env["GIT_PASSWORD"] = GITHUB_TOKEN
-        self.repo.remotes[remote].push(branch, env=env or None)
+        self.repo.remotes[remote].push(branch, env=self._remote_env())
         logger.info(f"Pushed {branch} → {remote}")
 
     def pull(self, remote: str = "origin", branch: str = "main") -> None:
-        """Pull from remote."""
+        """Pull from remote. Uses GITHUB_TOKEN env var if set."""
         if remote not in [r.name for r in self.repo.remotes]:
             raise ValueError(f"No remote '{remote}' configured")
-        self.repo.remotes[remote].pull(branch)
+        self.repo.remotes[remote].pull(branch, env=self._remote_env())
         logger.info(f"Pulled {branch} ← {remote}")
 
     def remove_remote(self, name: str = "origin") -> None:

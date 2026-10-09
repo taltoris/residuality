@@ -429,7 +429,7 @@ def history(project_id: str):
     searched and acted on.
     """
     repo    = get_repo(project_id)
-    commits = repo.get_commits()
+    commits = repo.get_commits(include_working=True)
     return render_template("history.html",
                            project_id=project_id,
                            commits=commits)
@@ -482,11 +482,13 @@ def view_commit(project_id: str, commit_hash: str):
 @login_required
 def diff_view(project_id: str, commit_a: str, commit_b: str):
     repo      = get_repo(project_id)
+    # `working` is accepted as either side so the working tree can be compared
+    # against any commit (see ArtifactRepo.diff).
     diff_text = repo.diff(commit_a, commit_b)
     return render_template("diff.html",
                            project_id=project_id,
-                           commit_a=commit_a[:8],
-                           commit_b=commit_b[:8],
+                           commit_a=commit_a if commit_a.lower() == "working" else commit_a[:8],
+                           commit_b=commit_b if commit_b.lower() == "working" else commit_b[:8],
                            diff=diff_text)
 
 

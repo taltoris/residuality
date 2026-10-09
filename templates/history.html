@@ -43,24 +43,33 @@
         </thead>
         <tbody id="hist-body">
         {% for c in commits %}
-            <tr data-text="{{ (c.short ~ ' ' ~ c.hash ~ ' ' ~ c.message ~ ' ' ~ (c.branches | join(' ')) ~ ' ' ~ (c.parents | join(' '))) | lower }}">
+            <tr data-text="{{ (c.short ~ ' ' ~ c.hash ~ ' ' ~ c.message ~ ' ' ~ (c.branches | join(' ')) ~ ' ' ~ (c.parents | join(' '))) | lower }}"
+                {% if c.working %}style="background:#1c2128;"{% endif %}>
                 <td><input type="radio" name="cmp-a" value="{{ c.hash }}"></td>
                 <td><input type="radio" name="cmp-b" value="{{ c.hash }}"></td>
-                <td class="hist-hash" data-hash="{{ c.hash }}" title="Click to copy the full hash"
-                    style="font-family:monospace;color:#58a6ff;cursor:pointer;">{{ c.short }}</td>
-                <td>{{ c.message }}{% if c.is_merge %} <span class="tag merge">merge</span>{% endif %}</td>
+                <td class="hist-hash" data-hash="{{ c.hash }}"
+                    title="{% if c.working %}The current working tree, not a commit{% else %}Click to copy the full hash{% endif %}"
+                    style="font-family:monospace;color:{% if c.working %}#d29922{% else %}#58a6ff{% endif %};cursor:pointer;">{{ c.short }}</td>
+                <td>{{ c.message }}
+                    {% if c.is_merge %} <span class="tag merge">merge</span>{% endif %}
+                    {% if c.working %} <span class="tag" style="color:#d29922;border-color:#d29922;">working</span>{% endif %}
+                </td>
                 <td>{% for b in c.branches %}<span class="tag">{{ b }}</span>{% endfor %}</td>
                 <td style="font-family:monospace;font-size:0.75rem;color:#8b949e;">
                     {{ c.parents | join(', ') or 'root' }}
                 </td>
                 <td style="white-space:nowrap;">
-                    <a href="/projects/{{ project_id }}/commit/{{ c.hash }}" class="btn">Files</a>
-                    <button class="btn hist-branch" data-hash="{{ c.hash }}">Branch</button>
-                    <form method="post" style="display:inline;"
-                          action="/projects/{{ project_id }}/checkout/{{ c.hash }}"
-                          onsubmit="return confirm('Check out {{ c.short }}? This changes the working tree.');">
-                        <button type="submit" class="btn btn-danger">Checkout</button>
-                    </form>
+                    {% if c.working %}
+                        <span style="font-size:0.75rem;color:#8b949e;">uncommitted — tick it as A or B to diff against a commit</span>
+                    {% else %}
+                        <a href="/projects/{{ project_id }}/commit/{{ c.hash }}" class="btn">Files</a>
+                        <button class="btn hist-branch" data-hash="{{ c.hash }}">Branch</button>
+                        <form method="post" style="display:inline;"
+                              action="/projects/{{ project_id }}/checkout/{{ c.hash }}"
+                              onsubmit="return confirm('Check out {{ c.short }}? This changes the working tree.');">
+                            <button type="submit" class="btn btn-danger">Checkout</button>
+                        </form>
+                    {% endif %}
                 </td>
             </tr>
         {% else %}
