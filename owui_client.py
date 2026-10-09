@@ -514,6 +514,32 @@ def strip_code_fence(text: str):
     return "\n".join(lines).strip("\n"), True
 
 
+# ── JSON objects in replies ───────────────────────────────────────────────
+
+def extract_json_object(text: str):
+    """Slice the outermost {...} out of a model reply. `(text, extracted)`.
+
+    A prompt can ask for "ONLY raw JSON" and still get the object wrapped in a
+    sentence ("Here is the JSON:") or trailed by a closing remark.
+    json.loads tolerates neither, and the failure is then reported as a parse
+    error rather than as the shape problem it actually is.
+
+    The first `{` and the last `}` bracket it, because the assessment prompt
+    asks for exactly one object. If either is missing there is nothing to
+    slice, so the text is returned unchanged and the caller fails on the real
+    error instead of on a slice that guessed -- the same principle as the two
+    cleanups above.
+    """
+    if not text:
+        return text, False
+
+    start = text.find("{")
+    end   = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return text, False
+    return text[start:end + 1], True
+
+
 class OWUIClient:
 
     def __init__(self):
@@ -669,7 +695,7 @@ class OWUIClient:
         first build, no log on a fresh repo. What is missing is named in the
         prompt, so the model reads it as "not yet" rather than "nothing here".
         """
-        import json, re
+        import json
     
         context_parts = []
         if snapshot:
@@ -720,26 +746,45 @@ class OWUIClient:
             "}"
         )
     
-        try:
-            response = self.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=model or self.PLANNER_MODEL,
-            )
-            clean = re.sub(r'```json|```', '', response).strip()
-            # Strip thinking block if present
-            if '<think>' in clean:
-                clean = re.sub(r'<think>.*?</think>', '', clean, flags=re.DOTALL).strip()
-            return json.loads(clean)
-        except Exception as e:
-            logger.warning(f"Plan generation failed: {e}")
+        def _fail(reason: str) -> dict:
+            """The shape the caller expects, with a readable reason.
+
+            `risks` used to carry `str(e)`, which is how a Python parse error
+            ended up rendered under "Risks" as though it were a project risk.
+            The detail goes to the log; the field gets a sentence.
+            """
             return {
                 "assessment": "Could not generate plan",
                 "next_task": "Review project state manually",
                 "approach": "",
                 "files_to_touch": [],
-                "risks": str(e),
+                "risks": reason,
                 "open_questions": [],
             }
+
+        try:
+            response = self.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=model or self.PLANNER_MODEL,
+            )
+        except Exception as e:
+            logger.warning(f"Plan generation failed (model call): {e}")
+            return _fail("the planner model could not be reached")
+
+        # The same two cleanups the edit path uses, and for the same reason,
+        # rather than a second inline copy that had already drifted: this one
+        # matched a literal lowercase <think> only, so <thinking> or <THINK>
+        # went through untouched. Then the object is sliced out of whatever
+        # prose surrounded it.
+        reply, _ = strip_think(response)
+        reply, _ = strip_code_fence(reply)
+        reply, _ = extract_json_object(reply)
+        try:
+            return json.loads(reply)
+        except Exception as e:
+            logger.warning(f"Plan generation failed (parse): {e}")
+            logger.warning(f"Plan reply that failed to parse: {reply[:2000]}")
+            return _fail("the planner's reply was not valid JSON")
 
 
 # ── Embeddings ────────────────────────────────────────────────────────────

@@ -357,10 +357,14 @@ function renderAssessment(p) {
     // the model had looked at everything.
     const c    = p.context || {};
     const commits = c.commits || 0;
+    const convs   = c.conversations || 0;
     const bits = [
         c.snapshot      ? 'latest snapshot' : 'no snapshot indexed yet',
         c.graph_summary ? 'graph outline'   : 'no graph built yet',
         commits + ' recent commit' + (commits === 1 ? '' : 's'),
+        convs > 0
+            ? convs + ' recent conversation' + (convs === 1 ? '' : 's')
+            : 'no conversations yet',
     ];
     html += '<p style="font-size:0.75rem;color:#8b949e;margin-top:0.5rem;">' +
             'Read from: ' + bits.join(' · ') + '</p>';
