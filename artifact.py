@@ -428,6 +428,98 @@ class ArtifactRepo:
         return self.write(path, "\n".join(lines) + "\n", message,
                           model_used=model_used, turn=turn)
 
+    # ── Working-tree create / delete ──────────────────────────────────────
+    # These stage their change and deliberately do NOT commit: the new file or
+    # deletion arrives in Regenerate & Commit for review, like any other
+    # working-tree change. Staging (rather than leaving the file untracked) is
+    # what makes it visible in the directory drill-down, which is built from
+    # `git ls-files` (the index) rather than the working tree.
+
+    def _parseable(self, filepath: str) -> bool:
+        """True when a parser would give the file a graph section."""
+        return bool(self._lang_key(filepath)) or filepath.lower().endswith(".md")
+
+    def new_file(self, path: str, content: str = "") -> dict:
+        """Create a file in the working tree, stage it, and (if parseable)
+        rebuild its graph section. Returns {path, graph, errors}.
+        """
+        errors: list = []
+        full = self.repo_path / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+
+        # Subprocess `git add` writes the on-disk index that `git ls-files`
+        # reads, so the directory view picks the file up on its next render.
+        try:
+            self.repo.git.add(path)
+        except Exception as e:
+            errors.append(f"stage: {e}")
+
+        parsed = self._parseable(path)
+        if parsed:
+            try:
+                self._update_graph(path)
+            except Exception as e:
+                logger.error(f"graph build failed for {path}: {e}", exc_info=True)
+                errors.append(f"graph: {type(e).__name__}: {e}")
+
+        logger.info(f"New file staged: {path}")
+        return {"path": path, "graph": parsed, "errors": errors}
+
+    def new_folder(self, name: str) -> dict:
+        """Create a folder, keeping it in git via a .gitkeep, and stage it.
+
+        Git cannot track an empty directory, so the .gitkeep is what makes the
+        folder appear in the (index-derived) directory view at all.
+        """
+        errors: list = []
+        folder = self.repo_path / name
+        folder.mkdir(parents=True, exist_ok=True)
+        keep = folder / ".gitkeep"
+        if not keep.exists():
+            keep.write_text("")
+
+        try:
+            self.repo.git.add(name)
+        except Exception as e:
+            errors.append(f"stage: {e}")
+
+        logger.info(f"New folder staged: {name}/")
+        return {"path": name, "errors": errors}
+
+    def remove_file(self, path: str) -> dict:
+        """Delete a file from the working tree and the index, and drop its
+        graph section. The deletion is staged (D) for Regenerate & Commit.
+        """
+        errors: list = []
+        full = self.repo_path / path
+        if full.exists():
+            full.unlink()
+
+        # --cached removes it from the index without requiring the working-tree
+        # file to still exist; --ignore-unmatch keeps it a no-op for a path
+        # that was never tracked.
+        try:
+            self.repo.git.rm("--cached", "--ignore-unmatch", path)
+        except Exception as e:
+            errors.append(f"unstage: {e}")
+
+        # Prune the graph so it stops pointing at the deleted file. The keep
+        # set is the index plus any untracked parseable files, so a file that
+        # is on disk but not yet committed is not pruned over a transient gap.
+        if self._parseable(path):
+            try:
+                tracked = set(self.repo.git.ls_files().splitlines())
+                untracked = set(self.repo.untracked_files or [])
+                keep = tracked | {f for f in untracked if self._parseable(f)}
+                self.prune_graph_sections(keep)
+            except Exception as e:
+                logger.error(f"graph prune failed for {path}: {e}", exc_info=True)
+                errors.append(f"graph prune: {type(e).__name__}: {e}")
+
+        logger.info(f"File deleted (staged): {path}")
+        return {"path": path, "errors": errors}
+
     # ── Branch / Merge ────────────────────────────────────────────────────
 
     def branch(self, name: str, from_commit: str, reason: str = "") -> str:

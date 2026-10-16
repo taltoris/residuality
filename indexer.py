@@ -154,7 +154,7 @@ def _qdrant_search(collection: str, vector: list,
 def ensure_collections() -> None:
     """
     No-op. Collections are created lazily per project on first write.
-    Retained for backward compatibility.
+    Retained for backward compatibility with older code paths that expect this function to exist.
     """
     pass
 

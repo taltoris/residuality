@@ -1419,6 +1419,92 @@ def save_lines(project_id: str):
     })
 
 
+# ── Working-tree create / delete ─────────────────────────────────────────
+# The directory drill-down is built from `git ls-files` (the index), so a new
+# file or folder has to be staged to appear, and a deleted file has to be
+# unstaged to disappear. These routes do exactly that and stop there: nothing
+# is committed, so the change waits in Regenerate & Commit for review, like a
+# save_lines edit does.
+
+def _clean_relpath(value: str) -> str:
+    """Normalise a user-supplied repo-relative path, or raise ValueError.
+
+    Rejects absolute paths and any `..` component, so a request can never
+    escape the repository root.
+    """
+    value = (value or "").strip().strip("/")
+    if not value:
+        raise ValueError("empty path")
+    if value.startswith("/"):
+        raise ValueError("absolute paths are not allowed")
+    parts = value.split("/")
+    if any(p == ".." for p in parts):
+        raise ValueError("'..' is not allowed in a path")
+    return value
+
+
+@app.route("/projects/<project_id>/graph/new_file", methods=["POST"])
+@login_required
+def graph_new_file(project_id: str):
+    """Create a file in the working tree, stage it, and rebuild its graph
+    section if a parser handles it. Left uncommitted for Regenerate & Commit.
+    """
+    repo = get_repo(project_id)
+    try:
+        path = _clean_relpath(request.form.get("path", ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    content = request.form.get("content", "")
+    if (repo.repo_path / path).exists():
+        return jsonify({"error": f"{path} already exists"}), 409
+    try:
+        result = repo.new_file(path, content)
+    except Exception as e:
+        logger.error(f"new_file failed for {path}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "ok", **result})
+
+
+@app.route("/projects/<project_id>/graph/new_folder", methods=["POST"])
+@login_required
+def graph_new_folder(project_id: str):
+    """Create a folder (kept in git via a .gitkeep) and stage it."""
+    repo = get_repo(project_id)
+    try:
+        name = _clean_relpath(request.form.get("name", ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if (repo.repo_path / name).exists():
+        return jsonify({"error": f"{name} already exists"}), 409
+    try:
+        result = repo.new_folder(name)
+    except Exception as e:
+        logger.error(f"new_folder failed for {name}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "ok", **result})
+
+
+@app.route("/projects/<project_id>/graph/delete", methods=["POST"])
+@login_required
+def graph_delete(project_id: str):
+    """Delete a file from the working tree and the index, and drop its graph
+    section. Staged as a deletion for Regenerate & Commit.
+    """
+    repo = get_repo(project_id)
+    try:
+        path = _clean_relpath(request.form.get("path", ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not (repo.repo_path / path).exists():
+        return jsonify({"error": f"{path} is not in the working tree"}), 404
+    try:
+        result = repo.remove_file(path)
+    except Exception as e:
+        logger.error(f"delete failed for {path}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"status": "ok", **result})
+
+
 @app.route("/projects/<project_id>/graph/ai_edit", methods=["POST"])
 @login_required
 def graph_ai_edit(project_id: str):
