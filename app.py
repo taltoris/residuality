@@ -180,6 +180,7 @@ def login():
 
 @app.route("/logout")
 def logout():
+    """Clears the user session and redirects to the login page."""
     session.clear()
     return redirect(url_for("login"))
 
@@ -428,11 +429,85 @@ def history(project_id: str):
     parents, branches and merge markers already conveys, and the list can be
     searched and acted on.
     """
-    repo    = get_repo(project_id)
-    commits = repo.get_commits(include_working=True)
+    repo = get_repo(project_id)
     return render_template("history.html",
                            project_id=project_id,
-                           commits=commits)
+                           **_history_context(repo, project_id))
+
+
+def _history_context(repo, project_id: str) -> dict:
+    """What the History page renders, and what a reset needs to warn with.
+
+    `head` and `detached` come along because Reset acts on the branch, and a
+    reader cannot judge what a rewind costs without knowing where HEAD is and
+    whether it is on a branch at all. `head` also lets a row tell whether it *is*
+    HEAD, which changes only the button's wording — every commit row offers a
+    Reset regardless.
+    """
+    return {
+        "commits":  repo.get_commits(include_working=True),
+        # Matches the `short` field get_commits emits, so the template can
+        # compare a row against HEAD directly.
+        "head":     repo.repo.head.commit.hexsha[:8],
+        "branch":   repo._current_branch(),
+        "detached": bool(repo.repo.head.is_detached),
+    }
+
+
+@app.route("/projects/<project_id>/reset_preview/<commit_hash>", methods=["POST"])
+@login_required
+def reset_preview(project_id: str, commit_hash: str):
+    """Report what a reset to this commit would destroy, changing nothing.
+
+    A hard reset costs two different things — commits off the branch and edits
+    out of the tree — and neither is obvious from the History table alone. The
+    browser cannot work either out, so the confirmation card asks for this
+    before it lets the real POST through.
+    """
+    repo = get_repo(project_id)
+    try:
+        return jsonify(repo.reset_preview(commit_hash))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/projects/<project_id>/reset/<commit_hash>", methods=["POST"])
+@login_required
+def reset(project_id: str, commit_hash: str):
+    """Move the branch back to a commit and discard uncommitted work.
+
+    The destructive counterpart of Checkout: that one only moves HEAD and keeps
+    the tree, this one rewinds the branch and wipes the tree. Rebuilding the
+    graph afterwards is not decoration — `.residuality/` is gitignored, so a
+    reset restores code but leaves graph.dot describing commits that are no
+    longer on the branch, and every model call reads that summary.
+    """
+    repo = get_repo(project_id)
+    try:
+        result  = repo.reset_to(commit_hash)
+        dropped = len(result["dropped"])
+        gone    = len(result["changed"]) + len(result["removed"])
+        flash(
+            f"{result['branch']} reset to {result['target']} — "
+            f"{dropped} commit{'' if dropped == 1 else 's'} dropped, "
+            f"{gone} uncommitted change{'' if gone == 1 else 's'} discarded."
+        , "success")
+    except Exception as e:
+        flash(str(e), "error")
+        return redirect(url_for("history", project_id=project_id))
+
+    try:
+        errors = _rebuild_graph(repo)
+        if not errors:
+            flash("Graph rebuilt to match the rewound tree.", "success")
+        else:
+            flash("Reset done, but the graph did not fully rebuild: "
+                  + "; ".join(errors[:3]), "error")
+    except Exception as e:
+        logger.warning(f"post-reset graph rebuild failed: {e}")
+        flash(f"Reset done, but rebuilding the graph failed: {e}", "error")
+
+    return redirect(url_for("history", project_id=project_id))
 
 
 @app.route("/projects/<project_id>/history/search", methods=["POST"])
@@ -1214,12 +1289,16 @@ def commit_all(project_id: str):
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
-@app.route("/projects/<project_id>/graph/regenerate", methods=["POST"])
-@login_required
-def regenerate_graph(project_id: str):
-    repo      = get_repo(project_id)
-    errors    = []
-    all_files = []
+def _rebuild_graph(repo) -> list:
+    """Re-parse every parseable file into graph.dot, and drop dead sections.
+
+    Returns a list of error strings; empty means clean. Deliberately does NOT
+    commit: callers that want the graph in history commit it themselves, and a
+    reset must not — an extra commit on top would undo the rewind it just
+    performed. Pruning matters as much as parsing here, since files removed by
+    the reset would otherwise leave their sections behind.
+    """
+    errors = []
 
     def _is_ignored(rel_path: str) -> bool:
         try:
@@ -1228,6 +1307,7 @@ def regenerate_graph(project_id: str):
         except Exception:
             return False
 
+    all_files = []
     for ext in ("*.py", "*.md", "*.html", "*.htm"):
         for f in sorted(repo.repo_path.rglob(ext)):
             rel = str(f.relative_to(repo.repo_path))
@@ -1245,6 +1325,15 @@ def regenerate_graph(project_id: str):
         repo.prune_graph_sections(set(all_files))
     except Exception as e:
         errors.append(f"prune: {e}")
+
+    return errors
+
+
+@app.route("/projects/<project_id>/graph/regenerate", methods=["POST"])
+@login_required
+def regenerate_graph(project_id: str):
+    repo   = get_repo(project_id)
+    errors = _rebuild_graph(repo)
 
     try:
         if repo.repo.is_dirty(index=True):

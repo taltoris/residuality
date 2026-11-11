@@ -57,12 +57,44 @@
         .btn-primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
         .btn-primary:hover { background: #388bfd; }
         .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
+        {# Checkout moves HEAD but keeps the tree, so it is a caution rather
+           than a loss — amber for that, with cherry red left for Reset.
+           Outline instead of solid: a filled block on every row competes with
+           the hash and message for attention, while an amber border and tint
+           still read as "be careful" without shouting. #}
+        .btn-warn {
+            background: rgba(210, 153, 34, 0.10);
+            border-color: #9e6a03;
+            color: #e3b341;
+        }
+        .btn-warn:hover { background: rgba(210, 153, 34, 0.22); border-color: #bb8009; }
         .card {
             background: #161b22;
             border: 1px solid #30363d;
             border-radius: 8px;
             padding: 1rem;
             margin-bottom: 1rem;
+        }
+        {# Confirmation dialogs. Fixed + inset:0 gives a real modal rather than
+           a card appended below the table, which meant scrolling to the bottom
+           of a long history to read what was about to be destroyed — and losing
+           sight of the row you clicked. The backdrop dims the table so the
+           clicked row stays visible behind the question. #}
+        .overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(1, 4, 9, 0.72);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            z-index: 100;
+        }
+        .overlay .card {
+            margin-bottom: 0;
+            max-height: calc(100vh - 3rem);
+            overflow-y: auto;
+            box-shadow: 0 12px 40px rgba(1, 4, 9, 0.8);
         }
         input, textarea, select {
             background: #0d1117;

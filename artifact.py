@@ -6,6 +6,7 @@ Handles init, read, write, branch, merge, checkout, diff, and optional remotes.
 
 import os
 import time
+import shutil
 import logging
 import re
 from pathlib import Path
@@ -566,6 +567,134 @@ class ArtifactRepo:
         self.repo.git.checkout(commit)
         logger.info(f"Checked out {commit[:8]}")
 
+    # ── Reset (go back to an earlier commit) ──────────────────────────────
+    # `checkout` above only moves HEAD and leaves uncommitted work sitting in
+    # the tree; it also drops a branch checkout into detached HEAD, where a
+    # later reset would move nothing. Reset is the opposite operation: it puts
+    # the *branch* back on an older commit and throws away whatever was in the
+    # tree. It is destructive by design, so the UI confirms first — which is
+    # what reset_preview is for: it answers "what will I lose?" without having
+    # touched anything.
+
+    def reset_preview(self, commit: str) -> dict:
+        """Describe what `reset_to` would destroy, without changing anything.
+
+        Returns the branch being rewound, the commits that would drop off it,
+        and the working-tree files that would be discarded. Both halves are
+        measured against HEAD rather than against the branch name, because a
+        branch ref can sit somewhere other than where HEAD is — after a
+        checkout of another commit, for instance — and a card that named one
+        while counting the other would misreport the cost.
+
+        `is_ancestor` separates "going back" from "jumping sideways": when the
+        target is not on HEAD's history, the dropped commits are not simply the
+        tail of the line, and the UI should say so instead of implying it.
+        """
+        target   = self.repo.commit(commit)
+        branch   = self._current_branch()
+        # `head.is_detached` is the authoritative check. `_current_branch()`
+        # reports "HEAD" when detached, but that string is also a legitimate
+        # branch name, so comparing names alone would let a reset through on a
+        # branch that happens to be called HEAD.
+        detached = bool(self.repo.head.is_detached)
+
+        # git exits non-zero (and GitPython raises) when the target is NOT an
+        # ancestor of HEAD. `with_extended_output` returns (status, stdout,
+        # stderr), so the exit code is element 0 — a clean zero is the only
+        # proof of a real rewind.
+        is_ancestor = False
+        try:
+            is_ancestor = self.repo.git.merge_base(
+                "--is-ancestor", target.hexsha, "HEAD",
+                with_extended_output=True)[0] == 0
+        except Exception:
+            is_ancestor = False
+
+        if detached:
+            # Nothing to rewind: HEAD is not a branch, so a hard reset here
+            # strands the caller's commits rather than removing them. Report
+            # what WOULD drop off HEAD anyway, so the warning is still honest.
+            dropped: list = []
+        else:
+            dropped = [{
+                "hash":    c.hexsha,
+                "short":   c.hexsha[:8],
+                "message": c.message.split("\n")[0],
+            } for c in self.repo.iter_commits(f"{target.hexsha}..HEAD")]
+
+        changed   = [d.a_path for d in self.repo.index.diff(None)]
+        staged    = [d.a_path for d in self.repo.index.diff("HEAD")]
+        untracked = [p for p in self.repo.untracked_files
+                     if not p.startswith(".residuality")]
+
+        return {
+            "branch":      branch,
+            "detached":    detached,
+            "is_ancestor": is_ancestor,
+            "target": {
+                "hash":    target.hexsha,
+                "short":   target.hexsha[:8],
+                "message": target.message.split("\n")[0],
+            },
+            "dropped":       dropped,
+            "changed":       sorted(set(changed + staged)),
+            "untracked":     sorted(untracked),
+            "head":          self.repo.head.commit.hexsha[:8],
+        }
+
+    def reset_to(self, commit: str) -> dict:
+        """Move the current branch back to a commit and discard working changes.
+
+        The hard half of "go back to a previous commit": the branch ref is
+        rewound (so the dropped commits leave History, though git keeps them in
+        the reflog), tracked edits are overwritten, and new files are deleted.
+        Untracked files under `.residuality` are left alone — that directory is
+        app state, not the user's work, and wiping it would take the graph and
+        the Plan conversations with it.
+
+        Refuses a detached HEAD rather than silently stranding commits; the
+        caller should offer to land on a branch first.
+        """
+        branch = self._current_branch()
+        if self.repo.head.is_detached:
+            raise ValueError(
+                "HEAD is detached, so there is no branch to move back. "
+                "Check out a branch first."
+            )
+
+        target  = self.repo.commit(commit)
+        preview = self.reset_preview(commit)
+
+        # `--hard` rewinds the ref and resets tracked files in one step; it
+        # does not remove untracked files, which is why they are handled here.
+        self.repo.git.reset("--hard", target.hexsha)
+
+        removed = []
+        for path in preview["untracked"]:
+            full = self.repo_path / path
+            try:
+                if full.is_dir():
+                    shutil.rmtree(full)
+                else:
+                    full.unlink()
+                removed.append(path)
+            except Exception as e:
+                logger.warning(f"reset: could not remove untracked {path}: {e}")
+
+        logger.info(
+            f"Reset '{branch}' {preview['head']} → {target.hexsha[:8]} "
+            f"(dropped {len(preview['dropped'])}, discarded "
+            f"{len(preview['changed'])} modified, removed {len(removed)} new)"
+        )
+        return {
+            "branch":  branch,
+            "head":    preview["head"],
+            "target":  target.hexsha[:8],
+            "dropped": preview["dropped"],
+            "changed": preview["changed"],
+            "removed": removed,
+        }
+
     # ── History ───────────────────────────────────────────────────────────
 
     def get_commits(self, include_working: bool = False) -> list:
@@ -621,12 +750,17 @@ class ArtifactRepo:
             head  = self.repo.head.commit.hexsha[:8]
             label = f"Uncommitted changes ({len(paths)} file{'' if len(paths)==1 else 's'})"
             shown = ", ".join(paths[:6]) + (" …" if len(paths) > 6 else "")
+            # A detached HEAD is not on any branch, so naming the branch here
+            # would be wrong — and the History row's Reset button is disabled
+            # in that state anyway, which should read as intentional.
+            where = ("detached" if self.repo.head.is_detached
+                     else self._current_branch())
             return {
                 "hash":      "working",
                 "short":     "working",
                 "message":   f"{label}: {shown}",
                 "parents":   [head],
-                "branches":  [self._current_branch()],
+                "branches":  [where],
                 "timestamp": int(time.time()),
                 "author":    "working tree",
                 "is_merge":  False,

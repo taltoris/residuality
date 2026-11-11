@@ -52,7 +52,6 @@
                     style="font-family:monospace;color:{% if c.working %}#d29922{% else %}#58a6ff{% endif %};cursor:pointer;">{{ c.short }}</td>
                 <td>{{ c.message }}
                     {% if c.is_merge %} <span class="tag merge">merge</span>{% endif %}
-                    {% if c.working %} <span class="tag" style="color:#d29922;border-color:#d29922;">working</span>{% endif %}
                 </td>
                 <td>{% for b in c.branches %}<span class="tag">{{ b }}</span>{% endfor %}</td>
                 <td style="font-family:monospace;font-size:0.75rem;color:#8b949e;">
@@ -60,15 +59,31 @@
                 </td>
                 <td style="white-space:nowrap;">
                     {% if c.working %}
-                        <span style="font-size:0.75rem;color:#8b949e;">uncommitted — tick it as A or B to diff against a commit</span>
+                        {# Nothing to do on the working row itself: it is not a
+           commit, so its pseudo-hash resolves nowhere in git. The action that
+           clears uncommitted work lives on the commit it returns you to — the
+           latest one, just below. #}
                     {% else %}
                         <a href="/projects/{{ project_id }}/commit/{{ c.hash }}" class="btn">Files</a>
                         <button class="btn hist-branch" data-hash="{{ c.hash }}">Branch</button>
                         <form method="post" style="display:inline;"
                               action="/projects/{{ project_id }}/checkout/{{ c.hash }}"
                               onsubmit="return confirm('Check out {{ c.short }}? This changes the working tree.');">
-                            <button type="submit" class="btn btn-danger">Checkout</button>
+                            <button type="submit" class="btn btn-warn">Checkout</button>
                         </form>
+                        {# Reset, not Checkout: this one moves the BRANCH back and
+           throws away uncommitted work, so it is the answer to "go back to a
+           previous commit". The confirm dialog is built from reset_preview so
+           it can name what is lost instead of asking blindly.
+
+           Every commit row carries a Reset, including HEAD's own. Against HEAD
+           nothing moves and no history is lost — it just discards uncommitted
+           work — which is the same verb one step weaker, and the preview card
+           relabels it "Discard changes" when that is what it is. #}
+                        <button class="btn btn-danger hist-reset" data-hash="{{ c.hash }}"
+                                title="{% if c.short == head %}Discard all uncommitted changes, staying on {{ branch }}{% else %}Move {{ branch }} back to this commit and discard uncommitted changes{% endif %}">
+                            Reset
+                        </button>
                     {% endif %}
                 </td>
             </tr>
@@ -77,6 +92,42 @@
         {% endfor %}
         </tbody>
     </table>
+</div>
+
+{# Reset confirmation, shown as a modal over the table. Populated from
+   /reset_preview/<hash> so the warning names the commits that drop off the branch
+   and the files that get discarded — a hard reset costs both, and neither is
+   visible in the table above. #}
+<div class="overlay" id="reset-overlay" style="display:none;">
+    <div class="card" id="reset-card" style="max-width:640px;width:100%;border-color:#da3633;">
+    <h2 style="color:#f85149;"><span id="reset-verb">Reset</span>
+        <span id="reset-branch" style="font-family:monospace;"></span>
+        <span id="reset-tail">back to
+            <span id="reset-target" style="font-family:monospace;color:#58a6ff;"></span>?</span></h2>
+    <p id="reset-note" style="font-size:0.85rem;color:#8b949e;margin-bottom:0.75rem;"></p>
+
+    <div id="reset-dropped-wrap" style="margin-bottom:0.75rem;">
+        <h3 id="reset-dropped-title" style="font-size:0.85rem;color:#f85149;margin-bottom:0.3rem;"></h3>
+        <div id="reset-dropped" style="font-size:0.8rem;color:#c9d1d9;"></div>
+    </div>
+
+    <div id="reset-files-wrap" style="margin-bottom:0.75rem;">
+        <h3 id="reset-files-title" style="font-size:0.85rem;color:#f85149;margin-bottom:0.3rem;"></h3>
+        <div id="reset-files" style="font-family:monospace;font-size:0.78rem;color:#c9d1d9;"></div>
+    </div>
+
+    <p style="font-size:0.78rem;color:#8b949e;margin-bottom:0.75rem;">
+        Dropped commits stay in git's reflog, so they are recoverable from the
+        command line — but they leave this list, and discarded edits do not come back.
+    </p>
+
+    <form method="post" id="reset-form">
+        <div style="display:flex;gap:0.5rem;">
+            <button type="submit" class="btn btn-danger">Reset — discard these changes</button>
+            <button type="button" class="btn" id="reset-cancel">Cancel</button>
+        </div>
+    </form>
+    </div>
 </div>
 
 <div class="card" id="branch-card" style="display:none;max-width:560px;">
@@ -212,6 +263,147 @@
     });
     document.getElementById('branch-cancel').addEventListener('click', function() {
         branchCard.style.display = 'none';
+    });
+
+    // ── Reset to an earlier commit ────────────────────────────────────
+    // Nothing here can be decided in the browser: which commits fall off the
+    // branch, and what is sitting uncommitted, both need the repository. So a
+    // click fetches the preview first and only then arms the form.
+    var resetOverlay = document.getElementById('reset-overlay');
+    var resetForm  = document.getElementById('reset-form');
+    var listFiles  = function(names) {
+        var shown = names.slice(0, 8).map(escapeHtml).join('<br>');
+        if (names.length > 8) shown += '<br><span style="color:#8b949e;">… and '
+                                     + (names.length - 8) + ' more</span>';
+        return shown;
+    };
+
+    document.querySelectorAll('.hist-reset').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var hash = this.dataset.hash;
+            // Open the modal instead of scrolling to a card at the bottom of the
+            // table: the row just clicked stays visible behind the backdrop, so
+            // the warning reads as being about that row.
+            resetOverlay.style.display = 'flex';
+            document.getElementById('reset-target').textContent = hash.slice(0, 8);
+            // Restore the branch-rewinding wording; a discard-only reset
+            // overwrites it below once the preview is known.
+            document.getElementById('reset-verb').textContent = 'Reset';
+            document.getElementById('reset-tail').style.display = '';
+            document.getElementById('reset-branch').textContent = '';
+            document.getElementById('reset-note').textContent   = 'checking what this would cost…';
+            ['reset-dropped', 'reset-files'].forEach(function(id) {
+                document.getElementById(id).innerHTML = '';
+            });
+            document.getElementById('reset-dropped-title').textContent = '';
+            document.getElementById('reset-files-title').textContent   = '';
+
+            fetch('/projects/' + PROJECT_ID + '/reset_preview/' + hash, { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d.error) {
+                        document.getElementById('reset-note').textContent = d.error;
+                        resetForm.style.display = 'none';
+                        return;
+                    }
+                    resetForm.style.display = '';
+                    resetForm.action = '/projects/' + PROJECT_ID + '/reset/' + hash;
+
+                    if (d.detached) {
+                        // A hard reset with HEAD detached moves no branch, which
+                        // would leave the commits in place and strand the user.
+                        document.getElementById('reset-branch').textContent = 'HEAD';
+                        document.getElementById('reset-note').innerHTML =
+                            '<strong style="color:#f85149;">HEAD is detached</strong> — '
+                            + 'there is no branch to move back, so this reset would not '
+                            + 'remove commits from <span style="font-family:monospace;">'
+                            + escapeHtml(d.branch) + '</span>. Check out a branch first.';
+                        document.getElementById('reset-dropped-title').textContent =
+                            d.dropped.length
+                                ? 'Commits that would be left behind (they stay on '
+                                  + escapeHtml(d.branch) + '):'
+                                : 'No commits would be affected.';
+                    } else if (!d.dropped.length && d.head === d.target.short) {
+                        // This commit is HEAD, so no branch moves and no commits
+                        // are at risk — the only thing destroyed is uncommitted
+                        // work. "Reset main back to <its own hash>" would sound
+                        // far more alarming than it is.
+                        document.getElementById('reset-branch').textContent = d.branch;
+                        // "Reset main back to <main's own hash>" reads like
+                        // history is being rewritten when it is not. Reframe the
+                        // heading as what is actually happening: a discard.
+                        document.getElementById('reset-verb').textContent = 'Discard changes on';
+                        document.getElementById('reset-tail').style.display = 'none';
+                        document.getElementById('reset-note').innerHTML =
+                            'Your branch stays on '
+                            + '<span style="font-family:monospace;">' + escapeHtml(d.head)
+                            + '</span>. This only throws away what you have not committed yet.';
+                        document.getElementById('reset-dropped-title').textContent =
+                            'No commits will be dropped.';
+                    } else {
+                        document.getElementById('reset-branch').textContent = d.branch;
+                        if (!d.is_ancestor) {
+                            document.getElementById('reset-note').innerHTML =
+                                '<strong style="color:#d29922;">This commit is not on '
+                                + escapeHtml(d.branch) + '</strong> — resetting here jumps '
+                                + 'the branch sideways rather than back, and the commits it '
+                                + 'currently holds would drop off.';
+                        } else {
+                            document.getElementById('reset-note').innerHTML =
+                                'Rewinding <span style="font-family:monospace;">'
+                                + escapeHtml(d.branch) + '</span> from '
+                                + '<span style="font-family:monospace;">' + escapeHtml(d.head)
+                                + '</span> to this commit.';
+                        }
+                        document.getElementById('reset-dropped-title').textContent =
+                            d.dropped.length
+                                ? 'Drops ' + d.dropped.length + ' commit'
+                                  + (d.dropped.length === 1 ? '' : 's') + ':'
+                                : 'No commits would be dropped.';
+                    }
+
+                    document.getElementById('reset-dropped').innerHTML =
+                        (d.dropped || []).map(function(c) {
+                            return '<span style="font-family:monospace;color:#58a6ff;">'
+                                + escapeHtml(c.short) + '</span> ' + escapeHtml(c.message);
+                        }).join('<br>');
+
+                    var changed   = d.changed   || [];
+                    var untracked = d.untracked || [];
+                    if (!changed.length && !untracked.length) {
+                        document.getElementById('reset-files-title').textContent =
+                            'The working tree is clean — nothing uncommitted to discard.';
+                    } else {
+                        var parts = [];
+                        if (changed.length)   parts.push(changed.length + ' modified file'   + (changed.length === 1 ? '' : 's') + ' reverted');
+                        if (untracked.length) parts.push(untracked.length + ' new file'      + (untracked.length === 1 ? '' : 's') + ' deleted');
+                        document.getElementById('reset-files-title').textContent =
+                            'Discards ' + parts.join(' and ') + ':';
+                        document.getElementById('reset-files').innerHTML =
+                            listFiles(changed.concat(untracked));
+                    }
+                })
+                .catch(function(e) {
+                    document.getElementById('reset-note').textContent =
+                        'Could not check: ' + e;
+                });
+        });
+    });
+
+    var closeReset = function() { resetOverlay.style.display = 'none'; };
+    document.getElementById('reset-cancel').addEventListener('click', closeReset);
+
+    // Clicking the dimmed area outside the card dismisses it, but only when the
+    // click starts on the backdrop itself — a text selection that begins inside
+    // the card and releases over the overlay must not close it.
+    resetOverlay.addEventListener('mousedown', function(e) {
+        if (e.target === resetOverlay) closeReset();
+    });
+
+    // Escape is the expected way out of a modal. The guard keeps it from firing
+    // while the branch dialog or an input is the thing in focus.
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && resetOverlay.style.display !== 'none') closeReset();
     });
 })();
 </script>
