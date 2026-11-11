@@ -63,8 +63,14 @@
 #node-modal header label:hover { background:#21262d;color:#c9d1d9; }
 #node-modal header input[type=checkbox] { width:auto;margin:0;cursor:pointer;accent-color:#1f6feb; }
 #node-modal header button:disabled { opacity:.4;cursor:default;background:none;color:#8b949e; }
-#node-modal .editor { width:100%;min-height:260px;margin:0;padding:8px;background:#0d1117;color:#c9d1d9;border:0.5px solid #30363d;border-radius:6px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre;overflow:auto;resize:vertical; }
-#node-modal .diffview { margin-top:8px;padding:8px;background:#0d1117;border:0.5px solid #30363d;border-radius:6px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre;overflow:auto; }
+#node-modal .source.editing { display:flex;flex-direction:column; }
+/* The textarea and the diff are two renderings of the same text, so only one is
+   ever on show, and it fills the pane outright. With the diff hidden the box must
+   not stop at its min-height: an 80-line file would otherwise sit in the top half
+   of a tall modal with dead space beneath it. */
+#node-modal .editor { flex:1;min-height:260px;width:100%;margin:0;padding:8px;background:#0d1117;color:#c9d1d9;border:0.5px solid #30363d;border-radius:6px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre;overflow:auto;resize:vertical; }
+#node-modal .source.editing .editor { min-height:0; }
+#node-modal .diffview { flex:1;width:100%;margin:0;padding:8px;background:#0d1117;border:0.5px solid #30363d;border-radius:6px;font-family:'Courier New',monospace;font-size:11px;line-height:1.5;white-space:pre;overflow:auto; }
 #node-modal .diffview .dl { display:block; }
 #node-modal .diffview .ln { display:inline-block;width:3.4em;padding-right:.5em;text-align:right;color:#484f58;user-select:none; }
 #node-modal .diffview .mk { display:inline-block;width:1.1em;user-select:none; }
@@ -1279,6 +1285,9 @@
         };
         var pane = sourcePane();
         pane.innerHTML = '';
+        // A stacked column, so whichever of the two renderings is on show
+        // stretches to fill the pane.
+        pane.classList.add('editing');
 
         // The box holds the *final draft* -- exactly the text the file will
         // get. "show changes" is a rendering of it against the original, never
@@ -1317,6 +1326,7 @@
         if (!editState) return;
         clearTimeout(diffTimer);
         editState = null;
+        sourcePane().classList.remove('editing');
         updateEditChrome();
     }
 
@@ -1417,9 +1427,12 @@
         var box = document.getElementById('modal-diff');
         var ta  = document.getElementById('modal-editor');
         if (!box || !ta || !editState) return;
+        // The box is the whole pane while the diff is off, so it keeps focus and
+        // leaves the caret where the reader put it.
         if (!document.getElementById('modal-showchanges').checked) {
             box.style.display = 'none';
             box.textContent   = '';
+            ta.focus();
             return;
         }
         var rows = diffRows(splitLines(editState.original), splitLines(ta.value));
